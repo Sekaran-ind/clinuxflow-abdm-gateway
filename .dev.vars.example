@@ -2,3 +2,8 @@
 # ClinuxFlow registered on the ABDM Sandbox portal.
 ABDM_CLIENT_ID=your-sandbox-client-id
 ABDM_CLIENT_SECRET=your-sandbox-client-secret
+
+# Shared secret clinux-frontend sends as X-Service-Key — must match the frontend's
+# VITE_SERVICE_KEY for local dev. Any value works locally; production uses a real random secret
+# set via `wrangler secret put SERVICE_KEY`.
+SERVICE_KEY=dev-local-shared-secret

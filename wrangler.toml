@@ -22,10 +22,14 @@ ABDM_ABHA_BASE_URL = "https://abhasbx.abdm.gov.in/abha/api/v3"
 ABDM_X_CM_ID = "sbx"
 
 # --- Secrets (do NOT put these here) ------------------------------------------------------
-# Set with `wrangler secret put ABDM_CLIENT_ID` / `wrangler secret put ABDM_CLIENT_SECRET`,
-# and for local dev, copy .dev.vars.example to .dev.vars and fill them in.
+# Set with `wrangler secret put ABDM_CLIENT_ID` / `wrangler secret put ABDM_CLIENT_SECRET` /
+# `wrangler secret put SERVICE_KEY`, and for local dev, copy .dev.vars.example to .dev.vars and
+# fill them in.
 #   ABDM_CLIENT_ID
 #   ABDM_CLIENT_SECRET
+#   SERVICE_KEY       - shared secret clinux-frontend sends as X-Service-Key; see src/index.js's
+#                       auth middleware. Any long random string; generate with e.g.
+#                       `openssl rand -hex 32`.
 
 # --- Durable Objects -----------------------------------------------------------------------
 # SESSION_TOKEN: single global instance that owns the ABDM client-credential access token
