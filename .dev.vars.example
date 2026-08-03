@@ -1,0 +1,4 @@
+# Copy this file to .dev.vars (gitignored) and fill in the sandbox credentials issued when
+# ClinuxFlow registered on the ABDM Sandbox portal.
+ABDM_CLIENT_ID=your-sandbox-client-id
+ABDM_CLIENT_SECRET=your-sandbox-client-secret

@@ -1,0 +1,18 @@
+{
+  "name": "clinuxflow-abdm-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dedicated Cloudflare Worker that owns all ABDM (Ayushman Bharat Digital Mission) API integration for ClinuxFlow — session/token management, RSA encryption, HPR (Health Professional Registry) and HFR (Health Facility Registry) flows. clinuxflow-api and clinuxflow-web call this service instead of talking to ABDM directly.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "dependencies": {
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

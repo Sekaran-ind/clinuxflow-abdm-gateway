@@ -1,0 +1,61 @@
+name = "clinuxflow-abdm-gateway"
+main = "src/index.js"
+compatibility_date = "2026-07-19"
+
+# Needed for src/lib/encryption.js's PKCS1-padding path (HPR's createHprId/authPassword-family
+# APIs use RSA/ECB/PKCS1Padding, which the native Workers `crypto.subtle` does NOT implement —
+# WebCrypto only standardizes RSA-OAEP and RSASSA-PKCS1-v1_5 *signing*, not PKCS1 *encryption*.
+# node:crypto's publicEncrypt() fills that gap. See src/lib/encryption.js for details.
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+# --- Non-secret config -------------------------------------------------------------------
+# Swap these to production hosts (and set ABDM_ENV = "production") once NHA issues prod
+# credentials post-certification. Sandbox hosts confirmed against the supplied API docs.
+[vars]
+ABDM_ENV = "sandbox"
+ABDM_GATEWAY_BASE_URL = "https://dev.abdm.gov.in/api/hiecm/gateway/v3"
+ABDM_HPR_HFR_BASE_URL = "https://apihspsbx.abdm.gov.in/v4/int"
+ABDM_ABHA_BASE_URL = "https://abhasbx.abdm.gov.in/abha/api/v3"
+ABDM_X_CM_ID = "sbx"
+
+# --- Secrets (do NOT put these here) ------------------------------------------------------
+# Set with `wrangler secret put ABDM_CLIENT_ID` / `wrangler secret put ABDM_CLIENT_SECRET`,
+# and for local dev, copy .dev.vars.example to .dev.vars and fill them in.
+#   ABDM_CLIENT_ID
+#   ABDM_CLIENT_SECRET
+
+# --- Durable Objects -----------------------------------------------------------------------
+# SESSION_TOKEN: single global instance that owns the ABDM client-credential access token
+#   (~10h TTL in sandbox) — avoids every request re-authenticating with ABDM, and serializes
+#   concurrent refreshes so parallel requests don't race to mint duplicate tokens.
+# REGISTRATION_TXN: one instance per ABDM txnId, tracks progress through the multi-step
+#   OTP flows (HPR registration, HFR facility-manager auth) between separate HTTP requests,
+#   since Workers hold no state across invocations on their own.
+[[durable_objects.bindings]]
+name = "SESSION_TOKEN"
+class_name = "SessionTokenManager"
+
+[[durable_objects.bindings]]
+name = "REGISTRATION_TXN"
+class_name = "RegistrationTransaction"
+
+# new_sqlite_classes, not new_classes: this account is on Cloudflare's free plan, which requires
+# Durable Objects to use SQLite-backed storage (classic KV-backed DO storage needs a paid plan —
+# confirmed via the actual deploy error: "In order to use Durable Objects with a free plan, you
+# must create a namespace using a `new_sqlite_classes` migration" [code: 10097]). Both DO classes
+# here only use state.storage.get/put/delete/deleteAll/setAlarm + blockConcurrencyWhile, all
+# supported identically under SQLite-backed storage, so this needed no code changes.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SessionTokenManager", "RegistrationTransaction"]
+
+# --- KV: cached ABDM master/reference data (states, districts, facility types, medical
+# councils, etc.) — changes rarely, so we cache instead of hitting ABDM on every form render.
+# Create with: wrangler kv namespace create MASTER_DATA_CACHE
+# then replace the id below with the one it prints.
+[[kv_namespaces]]
+binding = "MASTER_DATA_CACHE"
+id = "4eb42b40ebd44c188318abbcf8a2188f"
