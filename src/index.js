@@ -12,6 +12,7 @@ import { cors } from 'hono/cors';
 import { hprRoutes } from './routes/hpr.js';
 import { hfrRoutes } from './routes/hfr.js';
 import { abhaRoutes } from './routes/abha.js';
+import { serviceKeyAuth } from './lib/serviceAuth.js';
 
 export { SessionTokenManager } from './durable-objects/SessionTokenManager.js';
 export { RegistrationTransaction } from './durable-objects/RegistrationTransaction.js';
@@ -31,18 +32,8 @@ app.use('/*', cors({ origin: ALLOWED_ORIGINS }));
 
 app.get('/health', (c) => c.json({ status: 'ok', service: 'clinuxflow-abdm-gateway' }));
 
-// Shared-secret gate: clinux-frontend is the only intended caller of everything below. CORS
-// alone only stops browser-originated cross-origin requests — it does nothing against a script
-// or curl hitting this Worker's URL directly, which is the actual risk here (an open relay in
-// front of real ABDM OTP-triggering APIs). Fails closed if SERVICE_KEY isn't configured.
-app.use('/*', async (c, next) => {
-    if (c.req.path === '/health') return next();
-    const key = c.req.header('X-Service-Key');
-    if (!c.env.SERVICE_KEY || key !== c.env.SERVICE_KEY) {
-        return c.json({ success: false, error: 'Unauthorized' }, 401);
-    }
-    return next();
-});
+// See src/lib/serviceAuth.js for what/why — unit tested there.
+app.use('/*', serviceKeyAuth({ exemptPaths: ['/health'] }));
 
 app.route('/hpr', hprRoutes);
 app.route('/hfr', hfrRoutes);
