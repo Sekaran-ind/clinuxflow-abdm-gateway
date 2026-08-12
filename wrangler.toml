@@ -11,6 +11,13 @@ compatibility_flags = ["nodejs_compat"]
 [observability]
 enabled = true
 
+# Pinned so `wrangler dev` doesn't fall onto 8787 by default -- that's clinuxflow-api's port.
+# clinux-frontend's own config.js/.env.local already hardcode this expectation
+# (VITE_ABDM_GATEWAY_BASE defaults to http://localhost:8788), this just makes the Worker's own
+# dev server match it without needing `--port 8788` remembered on every invocation.
+[dev]
+port = 8788
+
 # --- Non-secret config -------------------------------------------------------------------
 # Swap these to production hosts (and set ABDM_ENV = "production") once NHA issues prod
 # credentials post-certification. Sandbox hosts confirmed against the supplied API docs.
