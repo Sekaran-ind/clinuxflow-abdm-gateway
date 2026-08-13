@@ -25,7 +25,13 @@ const app = new Hono();
 const ALLOWED_ORIGINS = [
     'https://clinux.yaxb.ai',
     'http://localhost:5173',
+    // Capacitor's two platforms default to two DIFFERENT origins when no `server.androidScheme`
+    // override is set in capacitor.config.json (confirmed against the actual config -- there is
+    // none): iOS uses capacitor://localhost, Android uses https://localhost. Both are needed --
+    // this isn't one scheme with two names, it's a real platform difference. http://localhost
+    // (no port) is kept too for whatever local testing originally added it.
     'capacitor://localhost',
+    'https://localhost',
     'http://localhost',
 ];
 app.use('/*', cors({ origin: ALLOWED_ORIGINS }));
