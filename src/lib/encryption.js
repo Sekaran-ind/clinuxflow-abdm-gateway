@@ -16,16 +16,39 @@
 // /api/v1/auth/cert (unlike ABHA's /profile/public/certificate, which does). We assume the same
 // `{ "publicKey": "<base64 DER SPKI>" }` shape — confirm against the sandbox response the first
 // time this runs for real and adjust fetchPublicKey's field name if needed.
+//
+// KNOWN LIVE ISSUE (SPEC-24, first real exercise of this whole file, 2026-09-09): with a valid
+// Authorization header now sent (see fetchPublicKey's own doc comment), ABHA's
+// https://abhasbx.abdm.gov.in/abha/api/v3/profile/public/certificate — confirmed byte-for-byte
+// against the supplied doc's own URL (Environment URLs + the certificate step's own screenshot,
+// both agree) — returns a real HTTP 404 on the CURRENT sandbox, not the 200 the doc's own sample
+// response shows. The doc is dated 31-07-2025; today is over a year later, so this reads as
+// sandbox drift (endpoint moved/deprecated) rather than a bug in this file — every ABHA route
+// that encrypts anything (enrolment, login, the new Find/search) is blocked on this until ABDM's
+// real current cert endpoint is confirmed. Re-check against a newer ABHA API doc version, or
+// ABDM support, before assuming this file is broken.
 
 import { publicEncrypt, constants, createPublicKey } from 'node:crypto';
 
 /**
  * Fetches a fresh RSA public key from ABDM. ABDM expects a NEW key fetch per encryption
  * operation rather than a long-lived cache — do not cache this beyond a single transaction.
+ *
+ * `accessToken`, when given, is sent as `Authorization: Bearer <accessToken>` — a real bug found
+ * live (Playwright-driven, against the actual ABDM sandbox, not assumed): SPEC-24's own first-
+ * ever real exercise of this file found ABHA's /profile/public/certificate rejects an
+ * unauthenticated GET with a plain HTTP 401, despite fetching a "public" key — its own Postman
+ * sample request (the doc this file's header cites) shows a filled-in Auth tab, confirming this
+ * is real and expected, not a fluke. Optional (not required) rather than a second hardcoded
+ * assumption for HPR's own /api/v1/auth/cert — that endpoint's response shape already has an open
+ * TODO in this file's own header, and changing its behavior wasn't verified here.
  * @returns {Promise<string>} base64-encoded DER (SPKI) public key.
  */
-export async function fetchPublicKey(url) {
-    const response = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' } });
+export async function fetchPublicKey(url, accessToken) {
+    const response = await fetch(url, {
+        method: 'GET',
+        headers: { Accept: 'application/json', ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}) },
+    });
     if (!response.ok) {
         throw new Error(`Failed to fetch ABDM public key from ${url}: HTTP ${response.status}`);
     }

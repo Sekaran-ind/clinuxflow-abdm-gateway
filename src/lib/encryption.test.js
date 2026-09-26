@@ -99,4 +99,21 @@ describe('fetchPublicKey', () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 503 }));
         await expect(fetchPublicKey('https://example.test/cert')).rejects.toThrow(/HTTP 503/);
     });
+
+    it('sends Authorization: Bearer <accessToken> when one is given — real bug found live: ABHA\'s own /profile/public/certificate 401s without it', async () => {
+        const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ publicKey: 'abc123' }) });
+        vi.stubGlobal('fetch', fetchMock);
+        await fetchPublicKey('https://example.test/cert', 'my-token');
+        expect(fetchMock).toHaveBeenCalledWith('https://example.test/cert', expect.objectContaining({
+            headers: expect.objectContaining({ Authorization: 'Bearer my-token' }),
+        }));
+    });
+
+    it('omits Authorization entirely when no accessToken is given (HPR\'s own cert endpoint, unverified either way)', async () => {
+        const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ publicKey: 'abc123' }) });
+        vi.stubGlobal('fetch', fetchMock);
+        await fetchPublicKey('https://example.test/cert');
+        const headers = fetchMock.mock.calls[0][1].headers;
+        expect(headers.Authorization).toBeUndefined();
+    });
 });

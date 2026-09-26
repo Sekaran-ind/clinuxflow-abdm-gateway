@@ -166,6 +166,24 @@ async function cachedGet(c, cacheKey, path) {
     return c.json({ success: true, data });
 }
 
+// Real bug found live: fetch-facility-type/fetch-facility-Sub-type/get-owner-subtype/
+// get-specialities are NOT simple GET master lists like get-master-data/lgd/states below — per
+// New_HFR_APIs_Documentation_SBX.pdf §3.6-3.8 (cross-checked directly against the doc, not
+// assumed) they're real POST endpoints that REQUIRE a body (ownershipCode+systemOfMedicineCode /
+// facilityTypeCode / ownershipCode[+ownerSubtypeCode] / systemOfMedicineCode respectively) — an
+// earlier pass called all four via cachedGet() (a bare GET, no body), which fails regardless of
+// sandbox health; a prior comment attributing this to "the sandbox returning HIS-500" was
+// misdiagnosing this exact bug. Frontend-facing contract stays GET+query-params (matching
+// /master/lgd/districts's own convention below) — only the upstream call changes shape.
+async function cachedPost(c, cacheKey, path, body) {
+    const config = getAbdmConfig(c.env);
+    const data = await getCachedMasterData(c.env.MASTER_DATA_CACHE, cacheKey, async () => {
+        const accessToken = await getAccessToken(c.env);
+        return callAbdm({ url: `${config.hprHfrBaseUrl}${path}`, method: 'POST', body, xCmId: config.xCmId, accessToken });
+    });
+    return c.json({ success: true, data });
+}
+
 // type = OWNER | MEDICINE | SPECIALITY-TYPE | TYPE-SERVICE | FAC-STATUS | WORKING-DAYS | ADDRESS-PROOF | ...
 hfrRoutes.get('/master/data', (c) => {
     const type = c.req.query('type');
@@ -175,13 +193,37 @@ hfrRoutes.get('/master/data', (c) => {
 
 hfrRoutes.get('/master/types', (c) => cachedGet(c, 'hfr:master-types', '/v1.5/facility/get-master-types'));
 
-hfrRoutes.get('/master/facility-types', (c) => cachedGet(c, 'hfr:facility-types', '/v1.5/facility/fetch-facility-type'));
+// Cache keys are parameterized by the real inputs (same reasoning hfr:lgd-districts:${stateCode}
+// below already gets right) — a flat, unparameterized key here would silently hand one facility's
+// results to every other facility with different ownership/system-of-medicine once the request
+// itself started succeeding.
+hfrRoutes.get('/master/facility-types', (c) => {
+    const ownershipCode = c.req.query('ownershipCode');
+    const systemOfMedicineCode = c.req.query('systemOfMedicineCode');
+    if (!ownershipCode || !systemOfMedicineCode) return c.json({ success: false, error: 'ownershipCode and systemOfMedicineCode query params are required' }, 400);
+    return cachedPost(c, `hfr:facility-types:${ownershipCode}:${systemOfMedicineCode}`, '/v1.5/facility/fetch-facility-type', { ownershipCode, systemOfMedicineCode });
+});
 
-hfrRoutes.get('/master/facility-sub-types', (c) => cachedGet(c, 'hfr:facility-sub-types', '/v1.5/facility/fetch-facility-Sub-type'));
+hfrRoutes.get('/master/facility-sub-types', (c) => {
+    const facilityTypeCode = c.req.query('facilityTypeCode');
+    if (!facilityTypeCode) return c.json({ success: false, error: 'facilityTypeCode query param is required' }, 400);
+    return cachedPost(c, `hfr:facility-sub-types:${facilityTypeCode}`, '/v1.5/facility/fetch-facility-Sub-type', { facilityTypeCode });
+});
 
-hfrRoutes.get('/master/owner-subtypes', (c) => cachedGet(c, 'hfr:owner-subtypes', '/v1.5/facility/get-owner-subtype'));
+// ownerSubtypeCode is optional (the doc's own §3.7 note: passing it gets the NEXT level of
+// subtypes under an already-chosen one; omitting it gets the first level for ownershipCode alone).
+hfrRoutes.get('/master/owner-subtypes', (c) => {
+    const ownershipCode = c.req.query('ownershipCode');
+    const ownerSubtypeCode = c.req.query('ownerSubtypeCode') || undefined;
+    if (!ownershipCode) return c.json({ success: false, error: 'ownershipCode query param is required' }, 400);
+    return cachedPost(c, `hfr:owner-subtypes:${ownershipCode}:${ownerSubtypeCode || ''}`, '/v1.5/facility/get-owner-subtype', { ownershipCode, ownerSubtypeCode });
+});
 
-hfrRoutes.get('/master/specialities', (c) => cachedGet(c, 'hfr:specialities', '/v1.5/facility/get-specialities'));
+hfrRoutes.get('/master/specialities', (c) => {
+    const systemOfMedicineCode = c.req.query('systemOfMedicineCode');
+    if (!systemOfMedicineCode) return c.json({ success: false, error: 'systemOfMedicineCode query param is required' }, 400);
+    return cachedPost(c, `hfr:specialities:${systemOfMedicineCode}`, '/v1.5/facility/get-specialities', { systemOfMedicineCode });
+});
 
 hfrRoutes.get('/master/lgd/states', (c) => cachedGet(c, 'hfr:lgd-states', '/v1.5/facility/lgd/states'));
 

@@ -48,8 +48,10 @@ function requireAbhaToken(c) {
     return token;
 }
 
-async function encryptForAbha(config, plaintext) {
-    const publicKey = await fetchPublicKey(`${config.abhaBaseUrl}/profile/public/certificate`);
+// accessToken is required, not optional — see fetchPublicKey's own header (real bug found live:
+// ABHA's /profile/public/certificate 401s without it, despite fetching a "public" key).
+async function encryptForAbha(config, plaintext, accessToken) {
+    const publicKey = await fetchPublicKey(`${config.abhaBaseUrl}/profile/public/certificate`, accessToken);
     return encryptOaepSha1(publicKey, plaintext);
 }
 
@@ -58,10 +60,10 @@ async function encryptForAbha(config, plaintext) {
 // scopes. loginId is always RSA-OAEP encrypted here.
 async function requestOtp(c, { path, scope, loginHint, plaintextLoginId, otpSystem, txnId, xToken }) {
     const config = getAbdmConfig(c.env);
-    const [accessToken, encryptedLoginId] = await Promise.all([
-        getAccessToken(c.env),
-        encryptForAbha(config, plaintextLoginId),
-    ]);
+    // Sequential, not Promise.all — encryptForAbha now genuinely depends on accessToken (see its
+    // own header), not just an independent parallel step.
+    const accessToken = await getAccessToken(c.env);
+    const encryptedLoginId = await encryptForAbha(config, plaintextLoginId, accessToken);
 
     return callAbdm({
         url: `${config.abhaBaseUrl}${path}`,
@@ -77,10 +79,8 @@ async function requestOtp(c, { path, scope, loginHint, plaintextLoginId, otpSyst
 // byAadhaar step also wants `mobile` inside the otp object).
 async function verifyOtp(c, { path, scope, txnId, otp, xToken, extraOtpFields = {}, extraBodyFields = {} }) {
     const config = getAbdmConfig(c.env);
-    const [accessToken, encryptedOtp] = await Promise.all([
-        getAccessToken(c.env),
-        encryptForAbha(config, otp),
-    ]);
+    const accessToken = await getAccessToken(c.env);
+    const encryptedOtp = await encryptForAbha(config, otp, accessToken);
 
     return callAbdm({
         url: `${config.abhaBaseUrl}${path}`,
@@ -256,6 +256,44 @@ abhaRoutes.post('/enrollment/address', async (c) => {
 
     await clearTransactionState(c.env, txnId);
     return c.json({ success: true, ...result });
+});
+
+// =================================================================================================
+// Find ABHA — doc §7.6.1 "Search ABHA using Mobile". SPEC-24 §7 step 6 (Patient) — closes the one
+// real gap in this file: before creating a NEW ABHA, front desk needs to check whether the
+// patient already has one. Confirmed directly against the doc's own sample request/response
+// (not assumed): the two follow-up steps (send an OTP to the chosen match, verify it) are the
+// SAME generic `/profile/login/request/otp` + `/profile/login/verify` pair the Login routes below
+// already wrap fully parametrically (loginHint:'index', the matched entry's own index RSA-
+// encrypted as loginId, otpSystem:'abdm') — so this is the only new endpoint this gap needs.
+// =================================================================================================
+
+// POST { mobile } -> { success, txnId, matches: [{index, abhaNumber, name, gender, kycVerified, authMethods}] }
+abhaRoutes.post('/find/search', async (c) => {
+    const { mobile } = await c.req.json();
+    if (!mobile) return c.json({ success: false, error: 'mobile is required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const accessToken = await getAccessToken(c.env);
+    const encryptedMobile = await encryptForAbha(config, mobile, accessToken);
+
+    const result = await callAbdm({
+        url: `${config.abhaBaseUrl}/profile/account/abha/search`,
+        xCmId: config.xCmId,
+        accessToken,
+        body: { scope: ['search-abha'], mobile: encryptedMobile },
+    });
+
+    // The doc's own sample response wraps a single {txnId, ABHA:[...]} object in a top-level
+    // array — defensively unwrapped here rather than assumed, since every OTHER ABHA endpoint in
+    // this file returns a bare object.
+    const payload = Array.isArray(result) ? result[0] : result;
+    const matches = (payload?.ABHA || []).map((m) => ({
+        index: m.index, abhaNumber: m.ABHANumber, name: m.name, gender: m.gender,
+        kycVerified: m.kycVerified, authMethods: m.authMethods,
+    }));
+
+    return c.json({ success: true, txnId: payload?.txnId, matches });
 });
 
 // =================================================================================================

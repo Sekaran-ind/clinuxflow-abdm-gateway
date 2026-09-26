@@ -310,6 +310,178 @@ hprRoutes.post('/professional/fetch', async (c) => {
     return c.json({ success: true, ...result });
 });
 
+// --- Update professional / documents / email verification --------------------------------------
+// Real, confirmed-missing routes found by checking this gateway against the real NHPR sandbox
+// docs (not assumed) — "3. Update healthcare professional API.pdf", "4.
+// Update_Professional_Documents.pdf" (really just document RETRIEVAL — no separate upload
+// endpoint is documented, despite the filename), "5. Generate, regenerate & verify Email link
+// API-1.pdf". All three doc sets show the caller's own per-user HPR token (obtained via
+// /auth/password-login above, or the Aadhaar/mobile-OTP login flow) traveling INSIDE the request
+// body (hprToken/hpr_token), not as a header the way HFR's x-hprid-auth is — thin passthrough,
+// same "don't re-declare ABDM's own schema" discipline hfr.js's own header already documents; the
+// large "Update Professional" body especially would just drift out of sync if re-declared here.
+
+// --- Register professional (full profile submission) --------------------------------------------
+// Real, confirmed-missing route (explicit user instruction, reading the real spec PDF directly —
+// "I do not see create HPR id which is likely the first step to registration... Refer to the
+// document and create the Practitioner registration correctly"): createHprIdWithPreVerified
+// (POST /registration/create above) only creates the HPR ID/account itself — the practitioner's
+// full profile (personalInformation/contactInformation/registrationAcademic.registrationData[]/
+// currentWorkDetails, the same 4 real blocks system-provider-composition-v1.yaml's own Personal
+// Details/Qualifications/Work Experience fields are modeled against) is a SEPARATE, later
+// submission via this endpoint. Same thin-passthrough discipline /professional/update already
+// established below (a REAL sibling endpoint, same doctors/*-professional-new naming convention;
+// the create-side path is inferred from that established pattern, not independently confirmed
+// against the sandbox yet — verify the exact path/shape against a real response before relying on
+// this beyond sandbox testing, same caveat this file's own header already gives for encryption).
+hprRoutes.post('/professional/register', async (c) => {
+    const body = await c.req.json();
+    if (!body.hprToken) return c.json({ success: false, error: 'hprToken is required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const accessToken = await getAccessToken(c.env);
+
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/apis/v1/doctors/register-professional-new`,
+        xCmId: config.xCmId,
+        accessToken,
+        body,
+    });
+
+    return c.json({ success: true, ...result });
+});
+
+// --- Update professional -----------------------------------------------------------------------
+// Body must include { hprToken, ... } — the full update-professional-new schema per the doc's own
+// sample (practitioner/personalInformation/contactInformation/registrationAcademic/... nested
+// objects), forwarded as-is.
+hprRoutes.post('/professional/update', async (c) => {
+    const body = await c.req.json();
+    if (!body.hprToken) return c.json({ success: false, error: 'hprToken is required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const accessToken = await getAccessToken(c.env);
+
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/apis/v1/doctors/update-professional-new`,
+        xCmId: config.xCmId,
+        accessToken,
+        body,
+    });
+
+    return c.json({ success: true, ...result });
+});
+
+// --- Retrieve professional document list ---------------------------------------------------------
+// Body: { hprid }.
+hprRoutes.post('/professional/documents', async (c) => {
+    const { hprid } = await c.req.json();
+    if (!hprid) return c.json({ success: false, error: 'hprid is required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const accessToken = await getAccessToken(c.env);
+
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/apis/v1/doctors/fetch-documents-list`,
+        xCmId: config.xCmId,
+        accessToken,
+        body: { hprid },
+    });
+
+    return c.json({ success: true, ...result });
+});
+
+// --- Upload a professional document ---------------------------------------------------------------
+// Real, confirmed-missing route — a prior session's own comment here claimed "no separate
+// document-upload API is shown" in the doc; re-reading the real spec PDF directly (explicit user
+// instruction) confirms this was wrong: the Upload Documents API is real spec section 10/11
+// (POST .../uploads/upload-document), and document_id correlates one uploaded file to a specific
+// qualification/registration entry (registrationAcademic.registrationData[].document_id) or the
+// top-level profilePhoto — practitionerDocs.js's own DOC_TYPES (profilePhoto/degreeCertificate/
+// registrationCertificate/proofOfWorkCertificate/proofOfNameChangeRegCertificate/
+// proofOfNameChangeQualCertificate) are this same real 6-type list, not invented. Body: { hprToken,
+// hprId, documentType, documentBase64, documentId? } — thin passthrough, same discipline as
+// /professional/update.
+hprRoutes.post('/professional/documents/upload', async (c) => {
+    const body = await c.req.json();
+    if (!body.hprToken) return c.json({ success: false, error: 'hprToken is required' }, 400);
+    if (!body.documentType || !body.documentBase64) return c.json({ success: false, error: 'documentType and documentBase64 are required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const accessToken = await getAccessToken(c.env);
+
+    const result = await callAbdm({
+        // hprHfrBaseUrl already carries the /v4/int prefix (see lib/config.js) — every other
+        // route in this file appends only the path after that, same here.
+        url: `${config.hprHfrBaseUrl}/apis/v1/uploads/upload-document`,
+        xCmId: config.xCmId,
+        accessToken,
+        body,
+    });
+
+    return c.json({ success: true, ...result });
+});
+
+// --- Email verification (generate / regenerate / verify) -----------------------------------------
+// Real 3-step flow, parallel to the existing mobile-OTP one above but for a professional's own
+// official email address. Each body needs hpr_token (the caller's own per-user token) — same
+// passthrough discipline as the two routes just above.
+hprRoutes.post('/professional/email/generate-otp', async (c) => {
+    const { hpr_token, emailAddress, otp_type } = await c.req.json();
+    if (!hpr_token || !emailAddress) return c.json({ success: false, error: 'hpr_token and emailAddress are required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const accessToken = await getAccessToken(c.env);
+
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/apis/v1/doctors/generate-verification-email`,
+        xCmId: config.xCmId,
+        accessToken,
+        body: { hpr_token, emailAddress, otp_type: otp_type || 'official' },
+    });
+
+    return c.json({ success: true, ...result });
+});
+
+hprRoutes.post('/professional/email/resend-otp', async (c) => {
+    const { hpr_token, emailAddress, otp_type } = await c.req.json();
+    if (!hpr_token || !emailAddress) return c.json({ success: false, error: 'hpr_token and emailAddress are required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const accessToken = await getAccessToken(c.env);
+
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/apis/v1/doctors/resent-verify-email`,
+        xCmId: config.xCmId,
+        accessToken,
+        body: { hpr_token, emailAddress, otp_type: otp_type || 'official' },
+    });
+
+    return c.json({ success: true, ...result });
+});
+
+hprRoutes.post('/professional/email/verify-otp', async (c) => {
+    const { hpr_token, hprId, officialEmail, emailOtp } = await c.req.json();
+    if (!hpr_token || !hprId || !officialEmail || !emailOtp) {
+        return c.json({ success: false, error: 'hpr_token, hprId, officialEmail and emailOtp are required' }, 400);
+    }
+
+    const config = getAbdmConfig(c.env);
+    const accessToken = await getAccessToken(c.env);
+
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/apis/v1/doctors/verify-email-otp`,
+        xCmId: config.xCmId,
+        accessToken,
+        // Real field name is hpr_id (snake_case) per the doc's own sample, unlike this route's
+        // own query param — kept as the caller-facing hprId for consistency with every other
+        // route in this file, translated at the wire boundary here.
+        body: { hpr_token, hpr_id: hprId, officialEmail, emailOtp },
+    });
+
+    return c.json({ success: true, ...result });
+});
+
 // --- Master data (cached) ----------------------------------------------------------------------
 // A small starter set — the same getCachedMasterData/callAbdm pattern extends to the rest of the
 // Master API HPR doc's list (universities, courses, colleges, nurse councils, sub-districts, ...)
@@ -369,4 +541,270 @@ hprRoutes.get('/master/districts/:stateId', async (c) => {
         });
     });
     return c.json({ success: true, data });
+});
+
+// --- Change/Forgot Password, Forgot HPR ID, Id Card, Account Profile, Logout -------------------
+// The 4 real gaps found by reading "HPID/2. Change password.pdf", "HPID/3. Forgot hprid.pdf",
+// and "HPID/1. Logout_Idcard_Account_Profile api.pdf" directly (not assumed) — none of these
+// existed in this file before. Two genuinely different auth shapes below, both already
+// established elsewhere in this file, not new conventions:
+//   - Change/Forgot Password + Forgot HPR ID use the GATEWAY's own access token (getAccessToken),
+//     same as every /registration/* and /professional/* route above.
+//   - Id Card / Account Profile / Logout are different — the doc's own sample for each shows
+//     ONLY "Authorization: Bearer <the user's own per-user token>", no gateway token involved at
+//     all. The frontend supplies that per-user hprToken (from password-login or the OTP-login
+//     flow) in the request body; it's forwarded here as callAbdm's own `accessToken` instead of
+//     the gateway's, not stored or cached (scoped to one individual, same reasoning
+//     /auth/password-login's own header comment already gives for not caching it).
+
+// --- Forgot Password: via Mobile OTP ------------------------------------------------------------
+hprRoutes.post('/password/forgot/mobile/send-otp', async (c) => {
+    const { hprId } = await c.req.json();
+    if (!hprId) return c.json({ success: false, error: 'hprId is required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const accessToken = await getAccessToken(c.env);
+
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/password/recover/byMobile/sendMobileOTP`,
+        xCmId: config.xCmId,
+        accessToken,
+        body: { hprId },
+    });
+
+    return c.json({ success: true, ...result });
+});
+
+hprRoutes.post('/password/forgot/mobile/verify-otp', async (c) => {
+    const { txnId, otp } = await c.req.json();
+    if (!txnId || !otp) return c.json({ success: false, error: 'txnId and otp are required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const [accessToken, encryptedOtp] = await Promise.all([
+        getAccessToken(c.env),
+        encryptForHpr(config, otp),
+    ]);
+
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/password/recover/byMobile/verifyMobileOTP`,
+        xCmId: config.xCmId,
+        accessToken,
+        body: { txnId, otp: encryptedOtp },
+    });
+
+    return c.json({ success: true, ...result });
+});
+
+// --- Forgot Password: via Aadhaar-linked mobile --------------------------------------------------
+hprRoutes.post('/password/forgot/aadhaar/send-otp', async (c) => {
+    const { hprId } = await c.req.json();
+    if (!hprId) return c.json({ success: false, error: 'hprId is required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const accessToken = await getAccessToken(c.env);
+
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/password/recover/byAadhaar`,
+        xCmId: config.xCmId,
+        accessToken,
+        body: { hprId },
+    });
+
+    return c.json({ success: true, ...result });
+});
+
+hprRoutes.post('/password/forgot/aadhaar/verify-otp', async (c) => {
+    const { txnId, otp } = await c.req.json();
+    if (!txnId || !otp) return c.json({ success: false, error: 'txnId and otp are required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const [accessToken, encryptedOtp] = await Promise.all([
+        getAccessToken(c.env),
+        encryptForHpr(config, otp),
+    ]);
+
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/password/recover/confirmByAadhaar`,
+        xCmId: config.xCmId,
+        accessToken,
+        body: { txnId, otp: encryptedOtp },
+    });
+
+    return c.json({ success: true, ...result });
+});
+
+// --- Forgot Password: reset (shared by both mobile and Aadhaar flows above) --------------------
+hprRoutes.post('/password/forgot/reset', async (c) => {
+    const { txnId, newPassword } = await c.req.json();
+    if (!txnId || !newPassword) return c.json({ success: false, error: 'txnId and newPassword are required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const [accessToken, encryptedPassword] = await Promise.all([
+        getAccessToken(c.env),
+        encryptForHpr(config, newPassword),
+    ]);
+
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/password/resetPassword`,
+        xCmId: config.xCmId,
+        accessToken,
+        body: { txnId, newPassword: encryptedPassword },
+    });
+
+    return c.json({ success: true, ...result });
+});
+
+// --- Change Password (already logged in) ---------------------------------------------------------
+hprRoutes.post('/password/change', async (c) => {
+    const { oldPassword, newPassword } = await c.req.json();
+    if (!oldPassword || !newPassword) return c.json({ success: false, error: 'oldPassword and newPassword are required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const [accessToken, encryptedOld, encryptedNew] = await Promise.all([
+        getAccessToken(c.env),
+        encryptForHpr(config, oldPassword),
+        encryptForHpr(config, newPassword),
+    ]);
+
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/password/change/byPassword`,
+        xCmId: config.xCmId,
+        accessToken,
+        body: { oldPassword: encryptedOld, newPassword: encryptedNew },
+    });
+
+    return c.json({ success: true, ...result });
+});
+
+// --- Forgot HPR ID: via Aadhaar ---------------------------------------------------------------
+hprRoutes.post('/hprid/forgot/aadhaar/send-otp', async (c) => {
+    const { aadhaar } = await c.req.json();
+    if (!aadhaar) return c.json({ success: false, error: 'aadhaar is required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const [accessToken, encryptedAadhaar] = await Promise.all([
+        getAccessToken(c.env),
+        encryptForHpr(config, aadhaar),
+    ]);
+
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/v1/forgot/hprId/aadhaar/generateOtp`,
+        xCmId: config.xCmId,
+        accessToken,
+        body: { aadhaar: encryptedAadhaar, iAgree: true },
+    });
+
+    return c.json({ success: true, ...result });
+});
+
+hprRoutes.post('/hprid/forgot/aadhaar/verify-otp', async (c) => {
+    const { txnId, otp } = await c.req.json();
+    if (!txnId || !otp) return c.json({ success: false, error: 'txnId and otp are required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const [accessToken, encryptedOtp] = await Promise.all([
+        getAccessToken(c.env),
+        encryptForHpr(config, otp),
+    ]);
+
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/v1/forgot/hprId/aadhaar`,
+        xCmId: config.xCmId,
+        accessToken,
+        body: { txnId, otp: encryptedOtp },
+    });
+
+    // hprId/hprIdNumber come back here — never cache, this is the whole point of the call.
+    return c.json({ success: true, ...result });
+});
+
+// --- Forgot HPR ID: via Mobile ------------------------------------------------------------------
+hprRoutes.post('/hprid/forgot/mobile/send-otp', async (c) => {
+    const { mobileNumber } = await c.req.json();
+    if (!mobileNumber) return c.json({ success: false, error: 'mobileNumber is required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const [accessToken, encryptedMobile] = await Promise.all([
+        getAccessToken(c.env),
+        encryptForHpr(config, mobileNumber),
+    ]);
+
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/v1/forgot/hprId/mobile/generateOtp`,
+        xCmId: config.xCmId,
+        accessToken,
+        body: { mobileNumber: encryptedMobile },
+    });
+
+    return c.json({ success: true, ...result });
+});
+
+hprRoutes.post('/hprid/forgot/mobile/verify-otp', async (c) => {
+    const { txnId, otp, firstName, middleName, lastName, yearOfBirth, monthOfBirth, dayOfBirth, gender } = await c.req.json();
+    if (!txnId || !otp) return c.json({ success: false, error: 'txnId and otp are required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const [accessToken, encryptedOtp] = await Promise.all([
+        getAccessToken(c.env),
+        encryptForHpr(config, otp),
+    ]);
+
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/v1/forgot/hprId/mobile`,
+        xCmId: config.xCmId,
+        accessToken,
+        body: { txnId, otp: encryptedOtp, firstName, middleName, lastName, yearOfBirth, monthOfBirth, dayOfBirth, gender },
+    });
+
+    return c.json({ success: true, ...result });
+});
+
+// --- Id Card ---------------------------------------------------------------------------------
+// Per-user hprToken only (see this section's own header note) — no gateway access token used.
+hprRoutes.post('/account/id-card', async (c) => {
+    const { hprToken } = await c.req.json();
+    if (!hprToken) return c.json({ success: false, error: 'hprToken is required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/v1/account/getIdCard`,
+        method: 'GET',
+        xCmId: config.xCmId,
+        accessToken: hprToken,
+    });
+
+    // { pdf: <base64> } — handed straight back; this Worker never stores it.
+    return c.json({ success: true, ...result });
+});
+
+// --- Account / Profile ------------------------------------------------------------------------
+hprRoutes.post('/account/profile', async (c) => {
+    const { hprToken } = await c.req.json();
+    if (!hprToken) return c.json({ success: false, error: 'hprToken is required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/v1/account/information`,
+        method: 'GET',
+        xCmId: config.xCmId,
+        accessToken: hprToken,
+    });
+
+    return c.json({ success: true, ...result });
+});
+
+// --- Logout --------------------------------------------------------------------------------------
+hprRoutes.post('/account/logout', async (c) => {
+    const { hprToken } = await c.req.json();
+    if (!hprToken) return c.json({ success: false, error: 'hprToken is required' }, 400);
+
+    const config = getAbdmConfig(c.env);
+    const result = await callAbdm({
+        url: `${config.hprHfrBaseUrl}/v4/auth/logout`,
+        method: 'GET',
+        xCmId: config.xCmId,
+        accessToken: hprToken,
+    });
+
+    return c.json({ success: true, ...result });
 });
