@@ -36,6 +36,13 @@ abhaRoutes.onError((err, c) => {
         console.error(`[abha] ABDM error ${err.status}:`, JSON.stringify(err.body));
         return c.json({ success: false, error: 'ABDM request failed', abdmStatus: err.status, abdmBody: err.body }, 502);
     }
+    // ABDM refusing the ABHA encryption-key request means this gateway's sandbox client isn't
+    // allowed to call ABHA APIs (seen 2026-09-30: 404 via the gateway, 401 "Invalid Credentials"
+    // directly). Say so, instead of a bare 500.
+    if (/Failed to fetch ABDM public key .*abha/i.test(err?.message || '')) {
+        console.error('[%s] ABHA certificate refused: %s', 'abha', err.message);
+        return c.json({ success: false, error: 'ABDM refused this gateway access to ABHA services. Its sandbox client needs ABHA (M1) API access; nothing was sent.' }, 502);
+    }
     console.error('[abha] unexpected error:', err);
     return c.json({ success: false, error: err.message }, 500);
 });

@@ -57,6 +57,13 @@ citizenRoutes.onError((err, c) => {
         console.error(`[citizen] ABDM error ${err.status} REQUEST-ID=${err.requestId}:`, JSON.stringify(err.body));
         return c.json({ success: false, error: 'ABDM request failed', abdmStatus: err.status, abdmBody: err.body, abdmRequestId: err.requestId }, 502);
     }
+    // ABDM refusing the ABHA encryption-key request means this gateway's sandbox client isn't
+    // allowed to call ABHA APIs (seen 2026-09-30: 404 via the gateway, 401 "Invalid Credentials"
+    // directly). Say so, instead of a bare 500.
+    if (/Failed to fetch ABDM public key .*abha/i.test(err?.message || '')) {
+        console.error('[%s] ABHA certificate refused: %s', 'citizen', err.message);
+        return c.json({ success: false, error: 'ABDM refused this gateway access to ABHA services. Its sandbox client needs ABHA (M1) API access; nothing was sent.' }, 502);
+    }
     console.error('[citizen] unexpected error:', err);
     return c.json({ success: false, error: 'Something went wrong' }, 500);
 });
