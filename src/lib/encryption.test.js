@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, vi, afterEach } from 'vitest';
 import { generateKeyPairSync, privateDecrypt, constants } from 'node:crypto';
-import { encryptOaepSha1, encryptPkcs1, fetchPublicKey } from './encryption.js';
+import { encryptOaepSha1, encryptPkcs1, fetchPublicKey, publicKeyFromBody } from './encryption.js';
 
 // One RSA keypair reused across tests — encryption is deterministic-enough per call that we
 // only need this to exercise the actual padding schemes, not to test RSA itself.
@@ -74,7 +74,7 @@ describe('fetchPublicKey', () => {
     it('returns the key from a "publicKey" field', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
             ok: true,
-            json: async () => ({ publicKey: 'abc123' }),
+            text: async () => JSON.stringify({ publicKey: 'abc123' }),
         }));
         await expect(fetchPublicKey('https://example.test/cert')).resolves.toBe('abc123');
     });
@@ -82,7 +82,7 @@ describe('fetchPublicKey', () => {
     it('falls back to a "public_key" (snake_case) field', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
             ok: true,
-            json: async () => ({ public_key: 'xyz789' }),
+            text: async () => JSON.stringify({ public_key: 'xyz789' }),
         }));
         await expect(fetchPublicKey('https://example.test/cert')).resolves.toBe('xyz789');
     });
@@ -90,7 +90,7 @@ describe('fetchPublicKey', () => {
     it('throws when the response has neither field', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
             ok: true,
-            json: async () => ({ somethingElse: true }),
+            text: async () => JSON.stringify({ somethingElse: true }),
         }));
         await expect(fetchPublicKey('https://example.test/cert')).rejects.toThrow(/did not contain/);
     });
@@ -101,7 +101,7 @@ describe('fetchPublicKey', () => {
     });
 
     it('sends Authorization: Bearer <accessToken> when one is given — real bug found live: ABHA\'s own /profile/public/certificate 401s without it', async () => {
-        const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ publicKey: 'abc123' }) });
+        const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => JSON.stringify({ publicKey: 'abc123' }) });
         vi.stubGlobal('fetch', fetchMock);
         await fetchPublicKey('https://example.test/cert', 'my-token');
         expect(fetchMock).toHaveBeenCalledWith('https://example.test/cert', expect.objectContaining({
@@ -109,11 +109,26 @@ describe('fetchPublicKey', () => {
         }));
     });
 
-    it('omits Authorization entirely when no accessToken is given (HPR\'s own cert endpoint, unverified either way)', async () => {
-        const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ publicKey: 'abc123' }) });
+    it('omits Authorization entirely when no accessToken is given', async () => {
+        const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => JSON.stringify({ publicKey: 'abc123' }) });
         vi.stubGlobal('fetch', fetchMock);
         await fetchPublicKey('https://example.test/cert');
         const headers = fetchMock.mock.calls[0][1].headers;
         expect(headers.Authorization).toBeUndefined();
+    });
+});
+
+describe('publicKeyFromBody', () => {
+    it('reads JSON, PEM (what the HPR cert endpoint returns) and bare base64 alike', () => {
+        const b64 = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAabc/def+ghi=';
+        expect(publicKeyFromBody(JSON.stringify({ publicKey: b64 }))).toBe(b64);
+        expect(publicKeyFromBody(`-----BEGIN PUBLIC KEY-----\n${b64.slice(0, 20)}\n${b64.slice(20)}\n-----END PUBLIC KEY-----\n`)).toBe(b64);
+        expect(publicKeyFromBody(`  ${b64}\n`)).toBe(b64);
+    });
+
+    it('refuses what is not a key', () => {
+        expect(() => publicKeyFromBody('{"x":1}')).toThrow(/did not contain/);
+        expect(() => publicKeyFromBody('<html>error</html>')).toThrow(/not a recognisable key/);
+        expect(() => publicKeyFromBody('{oops')).toThrow(/not valid JSON/);
     });
 });

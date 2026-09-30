@@ -33,8 +33,14 @@ hprRoutes.onError((err, c) => {
 
 // Every ABDM-encryption call needs a fresh public key — HPR's is a different key/endpoint from
 // ABHA's, and a different padding scheme (PKCS1 vs OAEP). See src/lib/encryption.js.
-async function encryptForHpr(config, plaintext) {
-    const publicKey = await fetchPublicKey(`${config.hprHfrBaseUrl}/api/v1/auth/cert`);
+//
+// The cert endpoint needs the gateway's own access token: without it the sandbox answers 401
+// ("Failed to fetch ABDM public key ... HTTP 401", seen live 2026-09-30 on Aadhaar OTP). The ABHA
+// cert fetch was fixed the same way earlier; this one had been missed. getAccessToken() is cached
+// by the SessionTokenManager Durable Object, so asking for it here costs nothing extra.
+async function encryptForHpr(env, config, plaintext) {
+    const accessToken = await getAccessToken(env);
+    const publicKey = await fetchPublicKey(`${config.hprHfrBaseUrl}/api/v1/auth/cert`, accessToken);
     return encryptPkcs1(publicKey, plaintext);
 }
 
@@ -47,7 +53,7 @@ hprRoutes.post('/registration/aadhaar-otp', async (c) => {
     const config = getAbdmConfig(c.env);
     const [accessToken, encryptedAadhaar] = await Promise.all([
         getAccessToken(c.env),
-        encryptForHpr(config, aadhaar),
+        encryptForHpr(c.env, config, aadhaar),
     ]);
 
     const result = await callAbdm({
@@ -77,7 +83,7 @@ hprRoutes.post('/registration/verify-aadhaar-otp', async (c) => {
     const config = getAbdmConfig(c.env);
     const [accessToken, encryptedOtp] = await Promise.all([
         getAccessToken(c.env),
-        encryptForHpr(config, otp),
+        encryptForHpr(c.env, config, otp),
     ]);
 
     const result = await callAbdm({
@@ -123,7 +129,7 @@ hprRoutes.post('/registration/demographic-auth-mobile', async (c) => {
     const config = getAbdmConfig(c.env);
     const [accessToken, encryptedMobile] = await Promise.all([
         getAccessToken(c.env),
-        encryptForHpr(config, mobileNumber),
+        encryptForHpr(c.env, config, mobileNumber),
     ]);
 
     const result = await callAbdm({
@@ -167,7 +173,7 @@ hprRoutes.post('/registration/verify-mobile-otp', async (c) => {
     const config = getAbdmConfig(c.env);
     const [accessToken, encryptedOtp] = await Promise.all([
         getAccessToken(c.env),
-        encryptForHpr(config, otp),
+        encryptForHpr(c.env, config, otp),
     ]);
 
     const result = await callAbdm({
@@ -216,8 +222,8 @@ hprRoutes.post('/registration/create', async (c) => {
     const config = getAbdmConfig(c.env);
     const [accessToken, encryptedEmail, encryptedPassword] = await Promise.all([
         getAccessToken(c.env),
-        encryptForHpr(config, payload.email),
-        encryptForHpr(config, payload.password),
+        encryptForHpr(c.env, config, payload.email),
+        encryptForHpr(c.env, config, payload.password),
     ]);
 
     const result = await callAbdm({
@@ -582,7 +588,7 @@ hprRoutes.post('/password/forgot/mobile/verify-otp', async (c) => {
     const config = getAbdmConfig(c.env);
     const [accessToken, encryptedOtp] = await Promise.all([
         getAccessToken(c.env),
-        encryptForHpr(config, otp),
+        encryptForHpr(c.env, config, otp),
     ]);
 
     const result = await callAbdm({
@@ -620,7 +626,7 @@ hprRoutes.post('/password/forgot/aadhaar/verify-otp', async (c) => {
     const config = getAbdmConfig(c.env);
     const [accessToken, encryptedOtp] = await Promise.all([
         getAccessToken(c.env),
-        encryptForHpr(config, otp),
+        encryptForHpr(c.env, config, otp),
     ]);
 
     const result = await callAbdm({
@@ -641,7 +647,7 @@ hprRoutes.post('/password/forgot/reset', async (c) => {
     const config = getAbdmConfig(c.env);
     const [accessToken, encryptedPassword] = await Promise.all([
         getAccessToken(c.env),
-        encryptForHpr(config, newPassword),
+        encryptForHpr(c.env, config, newPassword),
     ]);
 
     const result = await callAbdm({
@@ -662,8 +668,8 @@ hprRoutes.post('/password/change', async (c) => {
     const config = getAbdmConfig(c.env);
     const [accessToken, encryptedOld, encryptedNew] = await Promise.all([
         getAccessToken(c.env),
-        encryptForHpr(config, oldPassword),
-        encryptForHpr(config, newPassword),
+        encryptForHpr(c.env, config, oldPassword),
+        encryptForHpr(c.env, config, newPassword),
     ]);
 
     const result = await callAbdm({
@@ -684,7 +690,7 @@ hprRoutes.post('/hprid/forgot/aadhaar/send-otp', async (c) => {
     const config = getAbdmConfig(c.env);
     const [accessToken, encryptedAadhaar] = await Promise.all([
         getAccessToken(c.env),
-        encryptForHpr(config, aadhaar),
+        encryptForHpr(c.env, config, aadhaar),
     ]);
 
     const result = await callAbdm({
@@ -704,7 +710,7 @@ hprRoutes.post('/hprid/forgot/aadhaar/verify-otp', async (c) => {
     const config = getAbdmConfig(c.env);
     const [accessToken, encryptedOtp] = await Promise.all([
         getAccessToken(c.env),
-        encryptForHpr(config, otp),
+        encryptForHpr(c.env, config, otp),
     ]);
 
     const result = await callAbdm({
@@ -726,7 +732,7 @@ hprRoutes.post('/hprid/forgot/mobile/send-otp', async (c) => {
     const config = getAbdmConfig(c.env);
     const [accessToken, encryptedMobile] = await Promise.all([
         getAccessToken(c.env),
-        encryptForHpr(config, mobileNumber),
+        encryptForHpr(c.env, config, mobileNumber),
     ]);
 
     const result = await callAbdm({
@@ -746,7 +752,7 @@ hprRoutes.post('/hprid/forgot/mobile/verify-otp', async (c) => {
     const config = getAbdmConfig(c.env);
     const [accessToken, encryptedOtp] = await Promise.all([
         getAccessToken(c.env),
-        encryptForHpr(config, otp),
+        encryptForHpr(c.env, config, otp),
     ]);
 
     const result = await callAbdm({
