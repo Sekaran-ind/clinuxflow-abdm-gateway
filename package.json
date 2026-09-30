@@ -3,15 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Dedicated Cloudflare Worker that owns all ABDM (Ayushman Bharat Digital Mission) API integration for ClinuxFlow — session/token management, RSA encryption, HPR (Health Professional Registry) and HFR (Health Facility Registry) flows. clinuxflow-api and clinuxflow-web call this service instead of talking to ABDM directly.",
+  "description": "Dedicated Cloudflare Worker that owns all NHA integration for ClinuxFlow: ABDM (HPR, HFR, ABHA registries: session/token management, RSA encryption) and UHI (HSPA and EUA network roles: Ed25519 message signing, network registry lookup). The only component holding ABDM or UHI credentials.",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
-    "test": "vitest run"
+    "test": "vitest run",
+    "uhi:generate-keys": "node scripts/generate-uhi-keys.js"
   },
   "dependencies": {
-    "hono": "^4.6.0"
+    "@noble/hashes": "^1.8.0",
+    "hono": "^4.6.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "vitest": "^4.1.10",

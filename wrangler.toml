@@ -28,6 +28,22 @@ ABDM_HPR_HFR_BASE_URL = "https://apihspsbx.abdm.gov.in/v4/int"
 ABDM_ABHA_BASE_URL = "https://abhasbx.abdm.gov.in/abha/api/v3"
 ABDM_X_CM_ID = "sbx"
 
+# UHI (see src/uhi/config.js for every variable). "local" makes the EUA role call this Worker's
+# own HSPA and trust its own keys, for development; "sandbox" goes through the NHA UHI gateway
+# and resolves keys from its network registry (needs registered subscriber ids).
+UHI_GATEWAY_MODE = "local"
+UHI_DOMAIN = "nic2004:85111"
+UHI_COUNTRY = "IND"
+UHI_CITY = "std:011"
+UHI_REGISTRY_BASE_URL = "https://uhigatewaysandbox.abdm.gov.in"
+UHI_GATEWAY_BASE_URL = "https://uhigatewaysandbox.abdm.gov.in"
+# Set per environment: this Worker's public origin, the subscriber ids registered with the UHI
+# network registry, and which ClinuxFlow clinic ids may operate the HSPA.
+# UHI_PUBLIC_BASE_URL = "https://clinuxflow-abdm-gateway.<account>.workers.dev"
+# UHI_HSPA_SUBSCRIBER_ID = "..."   UHI_HSPA_PUB_KEY_ID = "k1"
+# UHI_EUA_SUBSCRIBER_ID = "..."    UHI_EUA_PUB_KEY_ID = "k1"
+# UHI_HSPA_OPERATOR_CLINIC_IDS = "<clinicId>[,<clinicId>...]"
+
 # --- Secrets (do NOT put these here) ------------------------------------------------------
 # Set with `wrangler secret put ABDM_CLIENT_ID` / `wrangler secret put ABDM_CLIENT_SECRET` /
 # `wrangler secret put SERVICE_KEY`, and for local dev, copy .dev.vars.example to .dev.vars and
@@ -36,7 +52,14 @@ ABDM_X_CM_ID = "sbx"
 #   ABDM_CLIENT_SECRET
 #   SERVICE_KEY       - shared secret clinux-frontend sends as X-Service-Key; see src/index.js's
 #                       auth middleware. Any long random string; generate with e.g.
-#                       `openssl rand -hex 32`.
+#                       `openssl rand -hex 32`. A bot filter only: its value ships in the
+#                       frontend bundle, so it is NOT user authentication.
+#   JWT_SECRET        - the SAME value clinuxflow-api signs session tokens with. Every
+#                       user-driven route verifies the caller's ClinuxFlow session with it
+#                       (src/lib/userSession.js); without it those routes answer 503.
+#   UHI_HSPA_PRIVATE_KEY_DER, UHI_EUA_PRIVATE_KEY_DER
+#                     - base64 PKCS8 Ed25519 private keys for the two UHI roles (generate with
+#                       `npm run uhi:generate-keys`). A role without a key is disabled.
 
 # --- Durable Objects -----------------------------------------------------------------------
 # SESSION_TOKEN: single global instance that owns the ABDM client-credential access token
@@ -53,6 +76,19 @@ class_name = "SessionTokenManager"
 name = "REGISTRATION_TXN"
 class_name = "RegistrationTransaction"
 
+# UHI_RECORDS: one instance per UHI record (EUA transaction, HSPA order, HSPA transaction index,
+#   published HSPA catalog). Replaces the in-process Maps of the former clinux-uhi-gateway,
+#   which lost every booking on restart, and serializes concurrent callbacks per transaction.
+# RATE_LIMITER: one instance per `${bucket}:${accountId}`, exact per-account counts across
+#   isolates for the user-driven routes (src/lib/rateLimit.js).
+[[durable_objects.bindings]]
+name = "UHI_RECORDS"
+class_name = "UhiRecordStore"
+
+[[durable_objects.bindings]]
+name = "RATE_LIMITER"
+class_name = "RateLimiter"
+
 # new_sqlite_classes, not new_classes: this account is on Cloudflare's free plan, which requires
 # Durable Objects to use SQLite-backed storage (classic KV-backed DO storage needs a paid plan —
 # confirmed via the actual deploy error: "In order to use Durable Objects with a free plan, you
@@ -62,6 +98,10 @@ class_name = "RegistrationTransaction"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SessionTokenManager", "RegistrationTransaction"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["UhiRecordStore", "RateLimiter"]
 
 # --- KV: cached ABDM master/reference data (states, districts, facility types, medical
 # councils, etc.) — changes rarely, so we cache instead of hitting ABDM on every form render.
