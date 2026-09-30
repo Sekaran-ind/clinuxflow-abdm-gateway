@@ -109,6 +109,20 @@ describe('fetchPublicKey', () => {
         }));
     });
 
+    it('sends REQUEST-ID and TIMESTAMP: ABHA answers 404 "Invalid Timestamp" without them', async () => {
+        const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => JSON.stringify({ publicKey: 'abc123' }) });
+        vi.stubGlobal('fetch', fetchMock);
+        await fetchPublicKey('https://example.test/cert', 'my-token');
+        const headers = fetchMock.mock.calls[0][1].headers;
+        expect(headers['REQUEST-ID']).toMatch(/^[0-9a-f-]{36}$/);
+        expect(new Date(headers.TIMESTAMP).toISOString()).toBe(headers.TIMESTAMP);
+    });
+
+    it('includes ABDM\'s error body in the failure', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, text: async () => '{"error":{"code":"ABDM-1016: ","message":"Invalid Timestamp"}}' }));
+        await expect(fetchPublicKey('https://example.test/cert')).rejects.toThrow(/HTTP 404 .*Invalid Timestamp/);
+    });
+
     it('omits Authorization entirely when no accessToken is given', async () => {
         const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => JSON.stringify({ publicKey: 'abc123' }) });
         vi.stubGlobal('fetch', fetchMock);

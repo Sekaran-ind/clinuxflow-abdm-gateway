@@ -45,12 +45,21 @@ import { publicEncrypt, constants } from 'node:crypto';
  * @returns {Promise<string>} base64-encoded DER (SPKI) public key.
  */
 export async function fetchPublicKey(url, accessToken) {
+    // REQUEST-ID and TIMESTAMP are required: without them ABHA's certificate endpoint answers 404
+    // {"code":"ABDM-1016","message":"Invalid Timestamp"} (found live 2026-09-30; it had been
+    // misread as the client lacking ABHA access). HPR's cert endpoint accepts them too.
     const response = await fetch(url, {
         method: 'GET',
-        headers: { Accept: 'application/json', ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}) },
+        headers: {
+            Accept: 'application/json',
+            'REQUEST-ID': crypto.randomUUID(),
+            TIMESTAMP: new Date().toISOString(),
+            ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
     });
     if (!response.ok) {
-        throw new Error(`Failed to fetch ABDM public key from ${url}: HTTP ${response.status}`);
+        const detail = String((await response.text?.().catch(() => '')) ?? '').slice(0, 200);
+        throw new Error(`Failed to fetch ABDM public key from ${url}: HTTP ${response.status}${detail ? ` ${detail}` : ''}`);
     }
     return publicKeyFromBody(await response.text(), url);
 }
