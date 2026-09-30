@@ -112,15 +112,76 @@ export async function startEuaSearch(deps, owner, intent) {
     }
 }
 
+/** Sends an order action (select/init/confirm/…) for a transaction to its provider. */
+export async function sendOrderAction(deps, record, action, order) {
+    const context = buildContext({
+        domain: deps.config.domain,
+        action,
+        city: deps.config.city,
+        country: deps.config.country,
+        consumerId: deps.identity.subscriberId,
+        consumerUri: deps.baseUrl,
+        providerId: record.providerId,
+        providerUri: record.providerUri,
+        transactionId: record.transactionId,
+    });
+    await signedPost(hspaActionUrl(record.providerUri, action), { context, message: { order } }, deps.identity, { fetchImpl: deps.fetchImpl });
+}
+
 const sha256Hex = async (text) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))].map((b) => b.toString(16).padStart(2, '0')).join('');
 
 // Speciality and service codes are short upper-case words (CARDIOLOGY, Consultation); nothing
 // else from a citizen reaches the network.
 const CODE = /^[A-Za-z][A-Za-z_ -]{1,39}$/;
 
-export function buildEuaCitizenRoutes(getDeps) {
+/**
+ * @param getDeps  the EUA deps resolver
+ * @param verifyCustomer  async (c) => { abhaNumber, abhaAddress, name } for the caller's ABHA
+ *   session, confirmed with ABDM, or throws. Booking uses only what ABDM confirms, never names
+ *   from the request, so nobody can book in someone else's name.
+ */
+export function buildEuaCitizenRoutes(getDeps, verifyCustomer) {
     const app = new Hono();
     app.use('*', requireEua(getDeps));
+
+    /** The transaction, if the caller holds its read key. */
+    async function keyed(c, transactionId) {
+        const readKey = c.req.header('X-Read-Key');
+        const record = readKey && transactionId ? await c.get('eua').store.get(recordKeys.euaTransaction(transactionId)) : null;
+        return record?.readKeyHash && record.readKeyHash === (await sha256Hex(readKey)) ? record : null;
+    }
+
+    // Booking: init (hold a slot) and confirm, for a signed-in ABHA holder.
+    app.post('/init', async (c) => {
+        const { transactionId, itemId, providerId } = await c.req.json().catch(() => ({}));
+        const record = await keyed(c, transactionId);
+        if (!record?.providerUri) return c.json({ success: false, error: 'Search again: this result is no longer available.' }, 409);
+        const customer = await verifyCustomer(c);
+        const customerHash = await sha256Hex(customer.abhaNumber || customer.abhaAddress);
+        await c.get('eua').store.apply(recordKeys.euaTransaction(transactionId), 'eua.customer', { customerHash });
+        const person = { name: customer.name, ...(customer.abhaAddress ? { cred: customer.abhaAddress } : {}) };
+        try {
+            await sendOrderAction(c.get('eua'), record, 'init', { item: { id: itemId }, provider: { id: providerId }, fulfillment: { customer: { person } }, billing: { name: customer.name } });
+        } catch {
+            return c.json({ success: false, error: 'The provider could not be reached.' }, 502);
+        }
+        return c.json({ success: true, transactionId }, 202);
+    });
+
+    app.post('/confirm', async (c) => {
+        const { transactionId } = await c.req.json().catch(() => ({}));
+        const record = await keyed(c, transactionId);
+        if (!record?.order?.id) return c.json({ success: false, error: 'Nothing is on hold for this booking yet.' }, 409);
+        const customer = await verifyCustomer(c);
+        // Only the ABHA holder who asked for the hold can confirm it.
+        if (record.customerHash !== (await sha256Hex(customer.abhaNumber || customer.abhaAddress))) return c.json({ success: false, error: 'not found' }, 404);
+        try {
+            await sendOrderAction(c.get('eua'), record, 'confirm', { id: record.order.id });
+        } catch {
+            return c.json({ success: false, error: 'The provider could not be reached.' }, 502);
+        }
+        return c.json({ success: true, transactionId }, 202);
+    });
 
     app.post('/search', async (c) => {
         const { by, code } = await c.req.json().catch(() => ({}));
@@ -138,7 +199,7 @@ export function buildEuaCitizenRoutes(getDeps) {
         const record = readKey ? await c.get('eua').store.get(recordKeys.euaTransaction(c.req.param('id'))) : null;
         // Operator transactions have no readKeyHash, so they can never match.
         if (!record?.readKeyHash || record.readKeyHash !== (await sha256Hex(readKey))) return c.json({ success: false, error: 'not found' }, 404);
-        return c.json({ success: true, transactionId: record.transactionId, createdAt: record.createdAt, catalogs: record.catalogs, ...(record.lastError ? { error: record.lastError } : {}) });
+        return c.json({ success: true, transactionId: record.transactionId, createdAt: record.createdAt, catalogs: record.catalogs, ...(record.order ? { order: record.order } : {}), ...(record.lastError ? { error: record.lastError } : {}) });
     });
 
     return app;
@@ -170,19 +231,8 @@ export function buildEuaInternalRoutes(getDeps) {
             if (!record?.providerUri) {
                 return c.json({ error: 'unknown transaction, or no provider discovered yet via search' }, 409);
             }
-            const context = buildContext({
-                domain: deps.config.domain,
-                action,
-                city: deps.config.city,
-                country: deps.config.country,
-                consumerId: deps.identity.subscriberId,
-                consumerUri: deps.baseUrl,
-                providerId: record.providerId,
-                providerUri: record.providerUri,
-                transactionId,
-            });
             try {
-                await signedPost(hspaActionUrl(record.providerUri, action), { context, message: { order } }, deps.identity, { fetchImpl: deps.fetchImpl });
+                await sendOrderAction(deps, record, action, order);
                 return c.json({ transactionId }, 202);
             } catch (err) {
                 return c.json({ transactionId, error: String(err) }, 502);

@@ -35,6 +35,11 @@ export function applyRecordOp(record, op, args = {}) {
             }
             return next;
         }
+        // A citizen booking: who (by a hash of their ABHA) asked for the hold.
+        case 'eua.customer': {
+            if (!record) return null;
+            return { ...record, customerHash: args.customerHash };
+        }
         case 'eua.error': {
             if (!record) return null;
             return { ...record, lastError: args.error };

@@ -101,7 +101,7 @@ describe('citizen ABHA sign-in', () => {
         });
         const res = await call(env, 'POST', '/citizen/abha/login/verify-otp', { body: { method: 'abha-mobile', txnId: 'tx-1', otp: '123456' } });
         expect(res.status).toBe(200);
-        expect(res.body).toEqual({ success: true, abhaToken: 'x-token', expiresIn: 1800, account: { abhaNumber: '91-1234-5678-9012', abhaAddress: 'meera@sbx', name: 'Meera Iyer', kycVerified: true } });
+        expect(res.body).toEqual({ success: true, abhaToken: 'x-token', tokenKind: 'abha', expiresIn: 1800, account: { abhaNumber: '91-1234-5678-9012', abhaAddress: 'meera@sbx', name: 'Meera Iyer', kycVerified: true } });
         const otp = calls[0].body.authData.otp;
         expect(otp.txnId).toBe('tx-1');
         expect(decrypt(otp.otpValue)).toBe('123456');
@@ -121,6 +121,50 @@ describe('citizen ABHA sign-in', () => {
     it('normaliseAbhaNumber', () => {
         expect(normaliseAbhaNumber('91 1234 5678 9012')).toBe('91-1234-5678-9012');
         expect(normaliseAbhaNumber('91-1234-5678-901')).toBeNull();
+    });
+});
+
+describe('citizen ABHA: address login, photo, card', () => {
+    it('signs in with an ABHA address through the PHR endpoints and returns a PHR token', async () => {
+        const env = makeEnv();
+        const calls = fakeAbdm({
+            '/phr/web/login/abha/request/otp': { txnId: 'tx-a', message: 'OTP is sent to Mobile number ending with ******9127' },
+            '/phr/web/login/abha/verify': { authResult: 'success', users: [{ abhaAddress: 'prabu@sbx', fullName: 'Prabu Segaran', abhaNumber: '91-4056-5007-1435', kycStatus: 'VERIFIED', profilePhoto: 'b64' }], tokens: { token: 'phr-token', expiresIn: 1800, refreshToken: 'r' } },
+        });
+        expect((await call(env, 'POST', '/citizen/abha/login/request-otp', { body: { method: 'abha-address', abhaAddress: 'not an address' } })).status).toBe(400);
+        const sent = await call(env, 'POST', '/citizen/abha/login/request-otp', { body: { method: 'abha-address', abhaAddress: 'Prabu@SBX' } });
+        expect(sent.body.txnId).toBe('tx-a');
+        expect(calls[0].body).toMatchObject({ scope: ['abha-address-login', 'mobile-verify'], loginHint: 'abha-address', otpSystem: 'abdm' });
+        expect(decrypt(calls[0].body.loginId)).toBe('prabu@sbx');
+        const v = await call(env, 'POST', '/citizen/abha/login/verify-otp', { body: { method: 'abha-address', txnId: 'tx-a', otp: '123456' } });
+        expect(v.body).toEqual({ success: true, abhaToken: 'phr-token', tokenKind: 'phr', expiresIn: 1800, account: { abhaNumber: '91-4056-5007-1435', abhaAddress: 'prabu@sbx', name: 'Prabu Segaran', kycVerified: true } });
+        expect(calls[1].url).toMatch(/\/phr\/web\/login\/abha\/verify$/);
+    });
+
+    it('returns the photo only when asked, and reads a PHR profile from the PHR path (falling back when the first 404s)', async () => {
+        const env = makeEnv();
+        const calls = fakeAbdm({ '/phr/web/login/profile/abhaprofile': { abhaAddress: 'prabu@sbx', fullName: 'Prabu Segaran', ABHANumber: '91-4056-5007-1435', profilePhoto: 'JPEGB64' } });
+        const h = { 'X-ABHA-Token': 'phr-token', 'X-ABHA-Kind': 'phr' };
+        const plain = await call(env, 'GET', '/citizen/abha/profile', { headers: h });
+        expect(plain.body.profile).toMatchObject({ name: 'Prabu Segaran', abhaAddress: 'prabu@sbx' });
+        expect(plain.body.profile.photo).toBeUndefined();
+        const withPhoto = await call(env, 'GET', '/citizen/abha/profile?photo=1', { headers: h });
+        expect(withPhoto.body.profile.photo).toBe('JPEGB64');
+        expect(calls.map((x) => x.url.split('/abha/api/v3')[1])).toContain('/phr/web/login/profile/abhaprofile');
+    });
+
+    it('fetches the ABHA card as a file, with its type', async () => {
+        const env = makeEnv();
+        const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+        vi.stubGlobal('fetch', vi.fn(async (url, init = {}) => {
+            const u = String(url);
+            if (u.endsWith('/profile/public/certificate')) return Response.json({ publicKey: publicKeyB64 });
+            if (u.endsWith('/profile/account/abha-card') && init.headers['X-token'] === 'Bearer x-token') return new Response(png, { headers: { 'content-type': 'image/png' } });
+            return new Response('{}', { status: 404 });
+        }));
+        const res = await call(env, 'GET', '/citizen/abha/card', { headers: { 'X-ABHA-Token': 'x-token' } });
+        expect(res.body).toEqual({ success: true, contentType: 'image/png', data: png.toString('base64') });
+        expect((await call(env, 'GET', '/citizen/abha/card')).status).toBe(401);
     });
 });
 
@@ -148,6 +192,44 @@ describe('citizen UHI search (anonymous)', () => {
         expect(got.body.catalogs[0].providers[0].items.length).toBeGreaterThan(0);
         expect((await call(env, 'GET', `/citizen/uhi/transactions/${transactionId}`)).status).toBe(404);
         expect((await call(env, 'GET', `/citizen/uhi/transactions/${transactionId}`, { headers: { 'X-Read-Key': 'guess' } })).status).toBe(404);
+    });
+
+    it('books for the signed-in ABHA holder: name from ABDM, not the request; only they can confirm', async () => {
+        const env = makeEnv();
+        const profiles = { 'meera-token': { ABHANumber: '91-1234-5678-9012', preferredAbhaAddress: 'meera@sbx', name: 'Meera Iyer' }, 'ravi-token': { ABHANumber: '91-9999-8888-7777', name: 'Ravi Kumar' } };
+        const realFetch = globalThis.fetch;
+        vi.stubGlobal('fetch', vi.fn(async (url, init = {}) => {
+            if (String(url).endsWith('/profile/account')) {
+                const p = profiles[String(init.headers['X-token']).replace('Bearer ', '')];
+                return p ? Response.json(p) : new Response('{}', { status: 401 });
+            }
+            return realFetch(url, init);
+        }));
+        const sentToProvider = [];
+        const route = env.UHI_FETCH_OVERRIDE;
+        env.UHI_FETCH_OVERRIDE = (url, init) => {
+            if (String(url).endsWith('/uhi/hspa/init')) sentToProvider.push(JSON.parse(init.body));
+            return route(url, init);
+        };
+        const started = await call(env, 'POST', '/citizen/uhi/search', { body: { code: 'CARDIOLOGY' } });
+        const { transactionId, readKey } = started.body;
+        const read = () => call(env, 'GET', `/citizen/uhi/transactions/${transactionId}`, { headers: { 'X-Read-Key': readKey } });
+        const t = await waitFor(async () => ((await read()).body.catalogs?.length ? read() : null));
+        const provider = t.body.catalogs[0].providers[0];
+        const item = provider.items[0];
+        const meera = { 'X-Read-Key': readKey, 'X-ABHA-Token': 'meera-token' };
+        expect((await call(env, 'POST', '/citizen/uhi/init', { headers: { 'X-ABHA-Token': 'meera-token' }, body: { transactionId, itemId: item.id, providerId: provider.id } })).status).toBe(409); // no read key
+        expect((await call(env, 'POST', '/citizen/uhi/init', { headers: { 'X-Read-Key': readKey }, body: { transactionId, itemId: item.id, providerId: provider.id } })).status).toBe(401); // no ABHA
+        const init = await call(env, 'POST', '/citizen/uhi/init', { headers: meera, body: { transactionId, itemId: item.id, providerId: provider.id, name: 'Somebody Else' } });
+        expect(init.status).toBe(202);
+        const held = await waitFor(async () => ((await read()).body.order?.state === 'INITIALIZED' ? read() : null));
+        expect(sentToProvider[0].message.order.fulfillment.customer.person).toEqual({ name: 'Meera Iyer', cred: 'meera@sbx' });
+        expect(JSON.stringify(sentToProvider)).not.toContain('Somebody Else');
+        expect(held.body.order.id).toBeTruthy();
+        expect((await call(env, 'POST', '/citizen/uhi/confirm', { headers: { 'X-Read-Key': readKey, 'X-ABHA-Token': 'ravi-token' }, body: { transactionId } })).status).toBe(404);
+        expect((await call(env, 'POST', '/citizen/uhi/confirm', { headers: meera, body: { transactionId } })).status).toBe(202);
+        const confirmed = await waitFor(async () => ((await read()).body.order?.state === 'CONFIRMED' ? read() : null));
+        expect(confirmed.body.order.state).toBe('CONFIRMED');
     });
 
     it('accepts only a short code, never a free-form intent', async () => {
