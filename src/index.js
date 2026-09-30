@@ -38,6 +38,9 @@ const app = new Hono();
 const ALLOWED_ORIGINS = [
     'https://clinux.yaxb.ai',
     'http://localhost:5173',
+    // clinux-cubo (the provider workspace) in development. Its HPR/HFR/UHI journeys call this
+    // Worker with the same session JWT and service key as clinux-frontend.
+    'http://localhost:5174',
     // Capacitor's two platforms default to two DIFFERENT origins when no `server.androidScheme`
     // override is set in capacitor.config.json (confirmed against the actual config -- there is
     // none): iOS uses capacitor://localhost, Android uses https://localhost. Both are needed --
