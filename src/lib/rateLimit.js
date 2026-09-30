@@ -32,13 +32,15 @@ async function durableHit(namespace, key, limit, windowMs) {
 }
 
 /**
- * @param {{ bucket: string, limit: number, windowSeconds: number }} options
+ * @param {{ bucket: string, limit: number, windowSeconds: number, key?: (c) => string | Promise<string> }} options
+ *   key: what to count by. Defaults to the signed-in account; citizen routes (no account) count
+ *   by client IP, and OTP routes additionally by a hash of the phone/ABHA number targeted.
  */
-export function rateLimit({ bucket, limit, windowSeconds }) {
+export function rateLimit({ bucket, limit, windowSeconds, key: keyOf }) {
     const windowMs = windowSeconds * 1000;
     return async (c, next) => {
         const user = c.get('user');
-        const key = `${bucket}:${user?.accountId ?? 'anonymous'}`;
+        const key = `${bucket}:${keyOf ? await keyOf(c) : (user?.accountId ?? 'anonymous')}`;
         const result = c.env.RATE_LIMITER
             ? await durableHit(c.env.RATE_LIMITER, key, limit, windowMs)
             : memoryHit(c.env, key, limit, windowMs);

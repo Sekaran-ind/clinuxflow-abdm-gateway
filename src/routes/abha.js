@@ -58,7 +58,7 @@ async function encryptForAbha(config, plaintext, accessToken) {
 // Shared by every "generate OTP" call across enrolment/login/profile-update — they all share
 // the same { scope, loginHint, loginId, otpSystem } body shape, just against different URLs and
 // scopes. loginId is always RSA-OAEP encrypted here.
-async function requestOtp(c, { path, scope, loginHint, plaintextLoginId, otpSystem, txnId, xToken }) {
+export async function requestOtp(c, { path, scope, loginHint, plaintextLoginId, otpSystem, txnId, xToken }) {
     const config = getAbdmConfig(c.env);
     // Sequential, not Promise.all — encryptForAbha now genuinely depends on accessToken (see its
     // own header), not just an independent parallel step.
@@ -77,7 +77,7 @@ async function requestOtp(c, { path, scope, loginHint, plaintextLoginId, otpSyst
 // Shared by every "verify OTP" call — { scope, authData: { authMethods: ['otp'], otp: {...} } }.
 // otpValue is always RSA-OAEP encrypted. extraOtpFields covers the odd one out (enrolment's
 // byAadhaar step also wants `mobile` inside the otp object).
-async function verifyOtp(c, { path, scope, txnId, otp, xToken, extraOtpFields = {}, extraBodyFields = {} }) {
+export async function verifyOtp(c, { path, scope, txnId, otp, xToken, extraOtpFields = {}, extraBodyFields = {} }) {
     const config = getAbdmConfig(c.env);
     const accessToken = await getAccessToken(c.env);
     const encryptedOtp = await encryptForAbha(config, otp, accessToken);
@@ -342,6 +342,7 @@ abhaRoutes.post('/login/verify-otp', async (c) => {
         path: '/profile/login/verify',
         scope,
         txnId,
+        otp, // was missing: ABDM received an encrypted "undefined" as the OTP
     });
 
     await clearTransactionState(c.env, txnId);

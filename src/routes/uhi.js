@@ -66,7 +66,7 @@ function hspaDeps(c) {
     return { config, identity: config.hspa.identity, baseUrl: config.hspa.baseUrl, store: getRecordStore(c.env), fetchImpl: fetchFor(c.env) };
 }
 
-function euaDeps(c) {
+export function euaDeps(c) {
     const config = configFor(c);
     if (!config.eua) return null;
     return {
