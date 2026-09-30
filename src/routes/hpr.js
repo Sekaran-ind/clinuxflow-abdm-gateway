@@ -17,7 +17,7 @@ import { Hono } from 'hono';
 import { callAbdm, AbdmApiError } from '../lib/abdmClient.js';
 import { getAbdmConfig } from '../lib/config.js';
 import { fetchPublicKey, encryptPkcs1 } from '../lib/encryption.js';
-import { getAccessToken, putTransactionState, recordOtpAttempt, clearTransactionState } from '../lib/sessionToken.js';
+import { getAccessToken, getTransactionState, putTransactionState, recordOtpAttempt, clearTransactionState } from '../lib/sessionToken.js';
 import { getCachedMasterData } from '../lib/masterData.js';
 
 export const hprRoutes = new Hono();
@@ -63,7 +63,11 @@ hprRoutes.post('/registration/aadhaar-otp', async (c) => {
         body: { aadhaar: encryptedAadhaar },
     });
 
-    await putTransactionState(c.env, result.txnId, { flow: 'hpr-aadhaar-registration', step: 'aadhaar-otp-sent' });
+    // Diagnostics without personal data: which kind of number was used (12-digit Aadhaar or
+    // 16-digit Virtual ID) and when the OTP went out, so a failed verification can be explained.
+    const idKind = String(aadhaar).replace(/\D/g, '').length === 16 ? 'vid' : 'aadhaar';
+    await putTransactionState(c.env, result.txnId, { flow: 'hpr-aadhaar-registration', step: 'aadhaar-otp-sent', idKind, otpSentAt: Date.now() });
+    console.log(`[hpr] aadhaar OTP sent txnId=${result.txnId} idKind=${idKind}`);
 
     // Never echo back the full mobile number to the caller — mask it, the doc's own sample
     // responses already mask everything but the last few digits.
@@ -86,12 +90,22 @@ hprRoutes.post('/registration/verify-aadhaar-otp', async (c) => {
         encryptForHpr(c.env, config, otp),
     ]);
 
-    const result = await callAbdm({
-        url: `${config.hprHfrBaseUrl}/v2/registration/aadhaar/verifyOTP`,
-        xCmId: config.xCmId,
-        accessToken,
-        body: { domainName: '@hpr.abdm', idType: 'hpr_id', otp: encryptedOtp, restrictions: '', txnId },
-    });
+    let result;
+    try {
+        result = await callAbdm({
+            url: `${config.hprHfrBaseUrl}/v2/registration/aadhaar/verifyOTP`,
+            xCmId: config.xCmId,
+            accessToken,
+            body: { domainName: '@hpr.abdm', idType: 'hpr_id', otp: encryptedOtp, restrictions: '', txnId },
+        });
+    } catch (err) {
+        // "Failed to retrieve aadhaar transaction details" (HIS-500) has been seen live; record what
+        // can explain it (number kind, time since the OTP, attempts) without any personal data.
+        const state = await getTransactionState(c.env, txnId).catch(() => null);
+        const seconds = state?.otpSentAt ? Math.round((Date.now() - state.otpSentAt) / 1000) : 'unknown';
+        console.error(`[hpr] verify-aadhaar-otp failed txnId=${txnId} knownTxn=${!!state?.otpSentAt} idKind=${state?.idKind ?? 'unknown'} secondsSinceOtp=${seconds} attempt=${attempt.attempts ?? '?'}`);
+        throw err;
+    }
 
     await putTransactionState(c.env, txnId, { step: 'aadhaar-otp-verified' });
     return c.json({ success: true, txnId: result.txnId });
