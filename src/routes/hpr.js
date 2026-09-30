@@ -24,8 +24,9 @@ export const hprRoutes = new Hono();
 
 hprRoutes.onError((err, c) => {
     if (err instanceof AbdmApiError) {
-        console.error(`[hpr] ABDM error ${err.status}:`, JSON.stringify(err.body));
-        return c.json({ success: false, error: 'ABDM request failed', abdmStatus: err.status, abdmBody: err.body }, 502);
+        // REQUEST-ID is what NHA's sandbox support asks for when reporting a failing call.
+        console.error(`[hpr] ABDM error ${err.status} REQUEST-ID=${err.requestId}:`, JSON.stringify(err.body));
+        return c.json({ success: false, error: 'ABDM request failed', abdmStatus: err.status, abdmBody: err.body, abdmRequestId: err.requestId }, 502);
     }
     console.error('[hpr] unexpected error:', err);
     return c.json({ success: false, error: err.message }, 500);
