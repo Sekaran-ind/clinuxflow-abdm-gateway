@@ -75,6 +75,37 @@ hprRoutes.post('/registration/aadhaar-otp', async (c) => {
     return c.json({ success: true, txnId: result.txnId, maskedMobile: result.mobileNumber });
 });
 
+// ABDM's sandbox answered "Failed to retrieve aadhaar transaction details" (HIS-500) to a verify
+// sent 14 s after a successful generateOtp (the OTP did reach the phone), and it answers the same
+// for a made-up txnId. If that is the sandbox reading a transaction store that hasn't caught up, or
+// a v2/v1 split, one pause-and-retry on v2 and then v1 (same txnId and OTP, no new OTP) gets through.
+// Each try is logged so the result tells us which, if any, works.
+const TXN_NOT_FOUND = /Failed to retrieve aadhaar transaction details/i;
+const isTxnNotFound = (err) => err instanceof AbdmApiError && TXN_NOT_FOUND.test(JSON.stringify(err.body ?? ''));
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function verifyAadhaarOtp(config, accessToken, txnId, encryptedOtp) {
+    const tries = [
+        { label: 'v2', wait: 0, url: `${config.hprHfrBaseUrl}/v2/registration/aadhaar/verifyOTP`, body: { domainName: '@hpr.abdm', idType: 'hpr_id', otp: encryptedOtp, restrictions: '', txnId } },
+        { label: 'v2-retry', wait: 2000, url: `${config.hprHfrBaseUrl}/v2/registration/aadhaar/verifyOTP`, body: { domainName: '@hpr.abdm', idType: 'hpr_id', otp: encryptedOtp, restrictions: '', txnId } },
+        { label: 'v1', wait: 0, url: `${config.hprHfrBaseUrl}/v1/registration/aadhaar/verifyOTP`, body: { otp: encryptedOtp, txnId } },
+    ];
+    let lastErr;
+    for (const t of tries) {
+        if (t.wait) await pause(t.wait);
+        try {
+            const result = await callAbdm({ url: t.url, xCmId: config.xCmId, accessToken, body: t.body });
+            console.log(`[hpr] verify-aadhaar-otp succeeded via ${t.label} txnId=${txnId}`);
+            return result;
+        } catch (err) {
+            console.error(`[hpr] verify-aadhaar-otp ${t.label} failed txnId=${txnId} REQUEST-ID=${err.requestId} ${JSON.stringify(err.body ?? err.message).slice(0, 200)}`);
+            lastErr = err;
+            if (!isTxnNotFound(err)) throw err; // a wrong OTP etc. is final
+        }
+    }
+    throw lastErr;
+}
+
 // --- Step 2: Verify Aadhaar OTP --------------------------------------------------------------
 hprRoutes.post('/registration/verify-aadhaar-otp', async (c) => {
     const { txnId, otp } = await c.req.json();
@@ -93,12 +124,7 @@ hprRoutes.post('/registration/verify-aadhaar-otp', async (c) => {
 
     let result;
     try {
-        result = await callAbdm({
-            url: `${config.hprHfrBaseUrl}/v2/registration/aadhaar/verifyOTP`,
-            xCmId: config.xCmId,
-            accessToken,
-            body: { domainName: '@hpr.abdm', idType: 'hpr_id', otp: encryptedOtp, restrictions: '', txnId },
-        });
+        result = await verifyAadhaarOtp(config, accessToken, txnId, encryptedOtp);
     } catch (err) {
         // "Failed to retrieve aadhaar transaction details" (HIS-500) has been seen live; record what
         // can explain it (number kind, time since the OTP, attempts) without any personal data.

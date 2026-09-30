@@ -41,3 +41,39 @@ describe('HPR encryption', () => {
         expect(cert.auth).toBe('Bearer gateway-token');
     });
 });
+
+describe('verify Aadhaar OTP when the sandbox cannot find the transaction', () => {
+    const notFound = () => Response.json({ code: 'HIS-422', details: [{ message: 'Failed to retrieve aadhaar transaction details for txnID - t', code: 'HIS-500' }] }, { status: 422 });
+    const cert = () => new Response(`-----BEGIN PUBLIC KEY-----\n${publicKeyB64.match(/.{1,64}/g).join('\n')}\n-----END PUBLIC KEY-----\n`);
+    const envWithTxn = { ...env, REGISTRATION_TXN: namespace(async () => Response.json({ allowed: true, attempts: 1 })) };
+    const verify = () => hprRoutes.request('/registration/verify-aadhaar-otp', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ txnId: 't', otp: '123456' }) }, envWithTxn);
+
+    it('retries v2 once, then tries v1, and returns the first success', async () => {
+        const hits = [];
+        vi.stubGlobal('fetch', vi.fn(async (url) => {
+            const u = String(url);
+            if (u.endsWith('/auth/cert')) return cert();
+            hits.push(u.includes('/v2/') ? 'v2' : 'v1');
+            return hits.length < 3 ? notFound() : Response.json({ txnId: 't' });
+        }));
+        vi.useFakeTimers({ toFake: ['setTimeout'] });
+        const pending = verify();
+        await vi.runAllTimersAsync();
+        const res = await pending;
+        vi.useRealTimers();
+        expect(hits).toEqual(['v2', 'v2', 'v1']);
+        expect(res.status).toBe(200);
+    });
+
+    it('does not retry other ABDM errors (e.g. a wrong OTP)', async () => {
+        const hits = [];
+        vi.stubGlobal('fetch', vi.fn(async (url) => {
+            if (String(url).endsWith('/auth/cert')) return cert();
+            hits.push(url);
+            return Response.json({ code: 'HIS-422', details: [{ message: 'Invalid OTP' }] }, { status: 422 });
+        }));
+        const res = await verify();
+        expect(res.status).toBe(502);
+        expect(hits).toHaveLength(1);
+    });
+});
