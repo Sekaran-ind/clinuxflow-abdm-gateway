@@ -41,3 +41,50 @@ describe('HPR encryption', () => {
         expect(cert.auth).toBe('Bearer gateway-token');
     });
 });
+
+describe('Aadhaar verification by link (NHA doc v2.0)', () => {
+    const envLink = { ...env, REGISTRATION_TXN: namespace(async () => Response.json({ ok: true, allowed: true, attempts: 1 })) };
+    const post = (path, body) => hprRoutes.request(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body ?? {}) }, envLink);
+    const stub = (routes) => {
+        const calls = [];
+        vi.stubGlobal('fetch', vi.fn(async (url, init = {}) => {
+            const u = String(url);
+            calls.push({ url: u, body: init.body ? JSON.parse(init.body) : undefined });
+            const k = Object.keys(routes).find((x) => u.endsWith(x));
+            return k ? routes[k]() : new Response('{}', { status: 404 });
+        }));
+        return calls;
+    };
+
+    it('issues a link to ABDM’s own Aadhaar page, with its expiry', async () => {
+        const calls = stub({ '/aadhaar/generateLink': () => Response.json({ status: 'URL GENERATED', txnId: 't1', url: 'https://healthidbeta.abdm.gov.in/abdm/aadhaar/gateway/auth?link_id=x' }) });
+        const res = await post('/registration/aadhaar-link');
+        const body = await res.json();
+        expect(body).toMatchObject({ success: true, txnId: 't1', url: 'https://healthidbeta.abdm.gov.in/abdm/aadhaar/gateway/auth?link_id=x' });
+        expect(new Date(body.expiresAt).getTime() - Date.now()).toBeGreaterThan(4 * 60 * 1000);
+        expect(calls[0].body).toEqual({ scopes: ['nhpr-register'], source: 'NHPR' });
+    });
+
+    it('refuses a link to anywhere but abdm.gov.in', async () => {
+        stub({ '/aadhaar/generateLink': () => Response.json({ txnId: 't1', url: 'https://evil.example/abdm.gov.in' }) });
+        expect((await post('/registration/aadhaar-link')).status).toBe(502);
+    });
+
+    it('reads the bare boolean status, and maps the verified details', async () => {
+        stub({ '/aadhaar/isAuthenticated': () => new Response('true', { headers: { 'content-type': 'application/json' } }) });
+        expect(await (await post('/registration/aadhaar-link/status', { txnId: 't1' })).json()).toEqual({ success: true, authenticated: true });
+        stub({ '/v2/registration/aadhaar/verifyOTP': () => Response.json({ txnId: 't1', mobileNumber: '******5126', photo: 'JPEG', name: 'Rahul Sharma', gender: 'M', birthdate: '1990-01-01', house: '12A', street: 'MG Road', district: 'Bangalore', state: 'Karnataka', pincode: '560001' }) });
+        const d = await (await post('/registration/aadhaar-link/details', { txnId: 't1' })).json();
+        expect(d).toMatchObject({ success: true, txnId: 't1', maskedMobile: '******5126', name: 'Rahul Sharma', birthdate: '1990-01-01', address: '12A, MG Road, Bangalore, Karnataka, 560001', photo: 'JPEG' });
+    });
+
+    it('passes ABDM’s "verification pending" through, and marks the account check as pre-verified', async () => {
+        stub({ '/v2/registration/aadhaar/verifyOTP': () => Response.json({ code: 'HIS-422', details: [{ message: 'Aadhaar verification is pending. Please complete it to continue.' }] }, { status: 422 }) });
+        const pending = await post('/registration/aadhaar-link/details', { txnId: 't1' });
+        expect(pending.status).toBe(502);
+        expect(JSON.stringify(await pending.json())).toMatch(/verification is pending/);
+        const calls = stub({ '/checkHpIdAccountExist': () => Response.json({ hprId: '', firstName: 'Rahul' }) });
+        await post('/registration/check-account-exists', { txnId: 't1', preverifiedCheck: true });
+        expect(calls[0].body).toEqual({ txnId: 't1', preverifiedCheck: true });
+    });
+});
