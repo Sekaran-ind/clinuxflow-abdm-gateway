@@ -194,10 +194,11 @@ hprRoutes.post('/registration/check-account-exists', async (c) => {
     const exists = Boolean(result.hprId);
     await putTransactionState(c.env, txnId, { step: 'account-checked', hpidExists: exists });
 
-    // Demographic details are useful to prefill the registration form, but strip the base64
-    // profilePhoto blob and any token before returning — the caller doesn't need it at this step.
+    // Demographic details prefill the registration form. The token is dropped; the KYC photo is
+    // returned separately because createHprIdWithPreVerified now requires profilePhoto (HPR doc
+    // v2.0, section 4: "profilePhoto ... Mandatory: Yes").
     const { profilePhoto, token, ...demographics } = result;
-    return c.json({ success: true, hpidExists: exists, demographics });
+    return c.json({ success: true, hpidExists: exists, demographics, photo: profilePhoto || null });
 });
 
 // --- Step 4a: Confirm Aadhaar-linked mobile matches the number the user provides --------------
@@ -218,7 +219,10 @@ hprRoutes.post('/registration/demographic-auth-mobile', async (c) => {
         body: { txnId, mobileNumber: encryptedMobile },
     });
 
-    return c.json({ success: true, txnId: result.txnId });
+    // v2 answers { verified, errorCode, reason, uidaiToken } (HPR doc v2.0, section 2). When it is
+    // false the number is not Aadhaar's and must be verified by mobile OTP; answering success
+    // regardless (as before) skipped that step.
+    return c.json({ success: true, verified: result?.verified === true, reason: result?.reason ?? null, txnId: result?.txnId || txnId });
 });
 
 // --- Step 4b: Fallback path — send a fresh OTP to a mobile number that doesn't match Aadhaar's -
@@ -305,31 +309,44 @@ hprRoutes.post('/registration/create', async (c) => {
         encryptForHpr(c.env, config, payload.password),
     ]);
 
-    const result = await callAbdm({
-        url: `${config.hprHfrBaseUrl}/v2/registration/aadhaar/createHprIdWithPreVerified`,
-        xCmId: config.xCmId,
-        accessToken,
-        body: {
-            txnId: payload.txnId,
-            email: encryptedEmail,
-            idType: 'hpr_id',
-            domainName: '@hpr.abdm',
-            firstName: payload.firstName,
-            middleName: payload.middleName || '',
-            lastName: payload.lastName,
-            password: encryptedPassword,
-            profilePhoto: payload.profilePhotoBase64 || '',
-            hprId: payload.hprId,
-            sourceType: payload.sourceType || 'AADHAAR',
-            hpCategoryCode: payload.hpCategoryCode,
-            hpSubCategoryCode: payload.hpSubCategoryCode,
-            clientId: '',
-            stateCode: payload.stateCode,
-            districtCode: payload.districtCode,
-            council: payload.council ?? false,
-            role: payload.role,
-        },
-    });
+    // Which fields were sent (never their values), logged if ABDM refuses, to pin its error down.
+    const shape = {
+        txnId: !!payload.txnId, hprId: payload.hprId ? (String(payload.hprId).includes('@') ? 'with-domain' : 'name-only') : 'missing',
+        photo: payload.profilePhotoBase64 ? 'present' : 'missing', category: payload.hpCategoryCode, subCategory: payload.hpSubCategoryCode,
+        role: payload.role, state: !!payload.stateCode, district: !!payload.districtCode,
+    };
+    let result;
+    try {
+        result = await callAbdm({
+            url: `${config.hprHfrBaseUrl}/v2/registration/aadhaar/createHprIdWithPreVerified`,
+            xCmId: config.xCmId,
+            accessToken,
+            body: {
+                txnId: payload.txnId,
+                email: encryptedEmail,
+                idType: 'hpr_id',
+                domainName: '@hpr.abdm',
+                firstName: payload.firstName,
+                middleName: payload.middleName || '',
+                lastName: payload.lastName,
+                password: encryptedPassword,
+                profilePhoto: payload.profilePhotoBase64 || '',
+                hprId: payload.hprId,
+                sourceType: payload.sourceType || 'AADHAAR',
+                // Integers in the OpenAPI schema (CreateAccountWithPreVerifiedAadhaar).
+                hpCategoryCode: Number(payload.hpCategoryCode),
+                hpSubCategoryCode: Number(payload.hpSubCategoryCode),
+                clientId: '',
+                stateCode: payload.stateCode,
+                districtCode: payload.districtCode,
+                council: payload.council ?? false,
+                role: Number(payload.role),
+            },
+        });
+    } catch (err) {
+        console.error(`[hpr] createHprIdWithPreVerified refused; fields sent: ${JSON.stringify(shape)}`);
+        throw err;
+    }
 
     await clearTransactionState(c.env, payload.txnId);
 

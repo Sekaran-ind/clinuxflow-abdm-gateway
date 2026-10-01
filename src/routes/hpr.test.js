@@ -88,3 +88,41 @@ describe('Aadhaar verification by link (NHA doc v2.0)', () => {
         expect(calls[0].body).toEqual({ txnId: 't1', preverifiedCheck: true });
     });
 });
+
+describe('HPR doc v2.0 corrections', () => {
+    const envT = { ...env, REGISTRATION_TXN: namespace(async () => Response.json({ ok: true, allowed: true, attempts: 1 })) };
+    const post = (path, body) => hprRoutes.request(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }, envT);
+    const cert = () => new Response(`-----BEGIN PUBLIC KEY-----\n${publicKeyB64.match(/.{1,64}/g).join('\n')}\n-----END PUBLIC KEY-----\n`);
+    const stub = (routes) => {
+        const calls = [];
+        vi.stubGlobal('fetch', vi.fn(async (url, init = {}) => {
+            const u = String(url);
+            if (u.endsWith('/auth/cert')) return cert();
+            calls.push({ url: u, body: init.body ? JSON.parse(init.body) : undefined });
+            const k = Object.keys(routes).find((x) => u.endsWith(x));
+            return k ? routes[k]() : new Response('{}', { status: 404 });
+        }));
+        return calls;
+    };
+
+    it('reports verified: false from the mobile check instead of success regardless', async () => {
+        stub({ '/demographicAuthViaMobile': () => Response.json({ verified: false, errorCode: 'X', reason: 'Mobile number not linked with Aadhaar', uidaiToken: null }) });
+        expect(await (await post('/registration/demographic-auth-mobile', { txnId: 't', mobileNumber: '9876543210' })).json()).toMatchObject({ success: true, verified: false, reason: 'Mobile number not linked with Aadhaar', txnId: 't' });
+        stub({ '/demographicAuthViaMobile': () => Response.json({ verified: true }) });
+        expect((await (await post('/registration/demographic-auth-mobile', { txnId: 't', mobileNumber: '9876543210' })).json()).verified).toBe(true);
+    });
+
+    it('returns the KYC photo from the account check (create needs it)', async () => {
+        stub({ '/checkHpIdAccountExist': () => Response.json({ hprId: '', firstName: 'Asha', profilePhoto: 'KYC', token: 'secret' }) });
+        const body = await (await post('/registration/check-account-exists', { txnId: 't' })).json();
+        expect(body).toMatchObject({ hpidExists: false, photo: 'KYC', demographics: { firstName: 'Asha' } });
+        expect(JSON.stringify(body)).not.toContain('secret');
+    });
+
+    it('sends category, sub-category and role as integers, and the photo', async () => {
+        const calls = stub({ '/createHprIdWithPreVerified': () => Response.json({ hprIdNumber: '71-0000', hprId: 'asha@hpr.abdm', token: 't' }) });
+        const res = await post('/registration/create', { txnId: 't', email: 'a@example.in', password: 'Str0ng!pass', firstName: 'Asha', lastName: 'Rao', hprId: 'asha.rao', stateCode: '29', districtCode: '572', role: '3', hpCategoryCode: '1', hpSubCategoryCode: '3', profilePhotoBase64: 'KYC' });
+        expect(res.status).toBe(200);
+        expect(calls[0].body).toMatchObject({ hpCategoryCode: 1, hpSubCategoryCode: 3, role: 3, profilePhoto: 'KYC' });
+    });
+});
