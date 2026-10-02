@@ -6,6 +6,7 @@
   "description": "Dedicated Cloudflare Worker that owns all NHA integration for ClinuxFlow: ABDM (HPR, HFR, ABHA registries: session/token management, RSA encryption) and UHI (HSPA and EUA network roles: Ed25519 message signing, network registry lookup). The only component holding ABDM or UHI credentials.",
   "scripts": {
     "dev": "wrangler dev",
+    "dev:shared-db": "wrangler dev --persist-to ../clinuxflow-api/.wrangler/state",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
     "test": "vitest run",

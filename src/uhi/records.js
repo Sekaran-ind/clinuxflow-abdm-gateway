@@ -13,7 +13,7 @@ export function applyRecordOp(record, op, args = {}) {
     switch (op) {
         // --- EUA transactions: keyed `eua-txn:<transactionId>` ---
         case 'eua.begin':
-            return record ?? newEuaTransaction(args.transactionId, args.clinicId, args.accountId);
+            return record ?? newEuaTransaction(args.transactionId, args.clinicId, args.accountId, args.readKeyHash);
         // eua.catalog/order/error/push: only transactions this gateway started (eua.begin) are
         // recorded; a callback for an unknown transaction is dropped (null), never creating an
         // ownerless record.
@@ -35,6 +35,11 @@ export function applyRecordOp(record, op, args = {}) {
             }
             return next;
         }
+        // A citizen booking: who (by a hash of their ABHA) asked for the hold.
+        case 'eua.customer': {
+            if (!record) return null;
+            return { ...record, customerHash: args.customerHash };
+        }
         case 'eua.error': {
             if (!record) return null;
             return { ...record, lastError: args.error };
@@ -55,10 +60,12 @@ export function applyRecordOp(record, op, args = {}) {
     }
 }
 
-function newEuaTransaction(transactionId, clinicId, accountId) {
+function newEuaTransaction(transactionId, clinicId, accountId, readKeyHash = null) {
     // clinicId/accountId: the ClinuxFlow user who started the transaction. Reads and follow-up
     // actions are restricted to that clinic (the lesson of finding S1: never look up by id alone).
-    return { transactionId, clinicId, accountId, createdAt: new Date().toISOString(), catalogs: [], pushes: [] };
+    // A citizen search (cubo-diary, no account) has no clinic: it carries readKeyHash instead, the
+    // SHA-256 of a random key only the searcher was given.
+    return { transactionId, clinicId: clinicId ?? null, accountId: accountId ?? null, ...(readKeyHash ? { readKeyHash } : {}), createdAt: new Date().toISOString(), catalogs: [], pushes: [] };
 }
 
 export const recordKeys = {
