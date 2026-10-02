@@ -28,7 +28,7 @@
 // real current cert endpoint is confirmed. Re-check against a newer ABHA API doc version, or
 // ABDM support, before assuming this file is broken.
 
-import { publicEncrypt, constants, createPublicKey } from 'node:crypto';
+import { publicEncrypt, constants } from 'node:crypto';
 
 /**
  * Fetches a fresh RSA public key from ABDM. ABDM expects a NEW key fetch per encryption
@@ -52,12 +52,32 @@ export async function fetchPublicKey(url, accessToken) {
     if (!response.ok) {
         throw new Error(`Failed to fetch ABDM public key from ${url}: HTTP ${response.status}`);
     }
-    const body = await response.json();
-    const key = body.publicKey || body.public_key;
-    if (!key) {
-        throw new Error(`ABDM public key response from ${url} did not contain a "publicKey" field`);
+    return publicKeyFromBody(await response.text(), url);
+}
+
+/**
+ * The key as base64 DER, whichever form ABDM sends it in. ABHA's certificate endpoint returns
+ * JSON ({ publicKey }), but HPR's /api/v1/auth/cert, once called with the access token, returns
+ * the key as a bare PEM block (seen live 2026-09-30: JSON.parse failed on "-----BEGIN ..."). Bare
+ * base64 is accepted too.
+ */
+export function publicKeyFromBody(text, url = 'ABDM') {
+    const trimmed = String(text ?? '').trim();
+    let key = trimmed;
+    if (trimmed.startsWith('{')) {
+        let body;
+        try {
+            body = JSON.parse(trimmed);
+        } catch {
+            throw new Error(`ABDM public key response from ${url} was not valid JSON`);
+        }
+        key = body.publicKey || body.public_key;
+        if (!key) throw new Error(`ABDM public key response from ${url} did not contain a "publicKey" field`);
     }
-    return key;
+    // Strip PEM armour (any "-----BEGIN/END ...-----" lines) and whitespace, leaving the base64 DER.
+    const der = String(key).replace(/-----(BEGIN|END)[^-]*-----/g, '').replace(/\s+/g, '');
+    if (!der || !/^[A-Za-z0-9+/]+={0,2}$/.test(der)) throw new Error(`ABDM public key response from ${url} was not a recognisable key`);
+    return der;
 }
 
 /**
@@ -90,10 +110,11 @@ export async function encryptOaepSha1(base64PublicKey, plaintext) {
  * @returns {string} base64-encoded ciphertext.
  */
 export function encryptPkcs1(base64PublicKey, plaintext) {
-    const der = Buffer.from(base64PublicKey, 'base64');
-    const publicKey = createPublicKey({ key: der, format: 'der', type: 'spki' });
+    // The key goes in as PEM text: workerd's node:crypto publicEncrypt rejects a KeyObject ("Received
+    // an instance of PublicKeyObject", seen live 2026-09-30), and Node accepts PEM just the same.
+    const pem = `-----BEGIN PUBLIC KEY-----\n${base64PublicKey.match(/.{1,64}/g).join('\n')}\n-----END PUBLIC KEY-----\n`;
     const ciphertext = publicEncrypt(
-        { key: publicKey, padding: constants.RSA_PKCS1_PADDING },
+        { key: pem, padding: constants.RSA_PKCS1_PADDING },
         Buffer.from(plaintext, 'utf-8')
     );
     return ciphertext.toString('base64');
