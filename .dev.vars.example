@@ -7,3 +7,12 @@ ABDM_CLIENT_SECRET=your-sandbox-client-secret
 # VITE_SERVICE_KEY for local dev. Any value works locally; production uses a real random secret
 # set via `wrangler secret put SERVICE_KEY`.
 SERVICE_KEY=dev-local-shared-secret
+
+# Must equal clinuxflow-api's JWT_SECRET: user-driven routes verify the ClinuxFlow session with it.
+JWT_SECRET=same-value-as-clinuxflow-api
+
+# UHI role keys (npm run uhi:generate-keys -- hspa / -- eua). A role without a key is disabled.
+UHI_HSPA_PRIVATE_KEY_DER=
+UHI_EUA_PRIVATE_KEY_DER=
+# Local dev: which ClinuxFlow clinic ids may use the HSPA operator routes (comma-separated).
+UHI_HSPA_OPERATOR_CLINIC_IDS=
