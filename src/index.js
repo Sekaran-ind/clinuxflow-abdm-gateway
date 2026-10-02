@@ -25,6 +25,7 @@ import { uhiRoutes } from './routes/uhi.js';
 import { citizenRoutes } from './routes/citizen.js';
 import { serviceKeyAuth } from './lib/serviceAuth.js';
 import { requireClinuxSession } from './lib/userSession.js';
+import { recordAbdmTransactions } from './lib/transactionLog.js';
 import { OTP_SENDING_PATHS, rateLimit } from './lib/rateLimit.js';
 
 export { SessionTokenManager } from './durable-objects/SessionTokenManager.js';
@@ -66,7 +67,8 @@ const userGate = [
     requireClinuxSession(),
     rateLimit({ bucket: 'abdm', limit: 120, windowSeconds: 60 }),
 ];
-for (const prefix of ['/hpr/*', '/hfr/*', '/abha/*']) app.use(prefix, ...userGate);
+// After the session gate, so every logged ABDM operation is attributed (src/lib/transactionLog.js).
+for (const prefix of ['/hpr/*', '/hfr/*', '/abha/*']) app.use(prefix, ...userGate, recordAbdmTransactions(prefix.slice(1, -2)));
 for (const path of OTP_SENDING_PATHS) app.use(path, rateLimit({ bucket: 'abdm-otp', limit: 10, windowSeconds: 600 }));
 
 app.route('/hpr', hprRoutes);

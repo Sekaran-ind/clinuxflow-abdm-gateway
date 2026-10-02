@@ -16,6 +16,7 @@
 import { Hono } from 'hono';
 import { serviceKeyAuth } from '../lib/serviceAuth.js';
 import { requireClinuxSession } from '../lib/userSession.js';
+import { recordAbdmTransactions } from '../lib/transactionLog.js';
 import { rateLimit } from '../lib/rateLimit.js';
 import { EUA_INBOUND_ACTIONS, HSPA_INBOUND_ACTIONS, PUSH_ACTIONS } from '../uhi/protocol.js';
 import { loadUhiConfig } from '../uhi/config.js';
@@ -108,6 +109,7 @@ const operatorGate = [
     serviceKeyAuth(),
     requireClinuxSession(),
     rateLimit({ bucket: 'uhi', limit: 120, windowSeconds: 60 }),
+    recordAbdmTransactions('uhi'),
 ];
 uhiRoutes.use('/hspa/internal/*', ...operatorGate, requireHspaOperator());
 uhiRoutes.use('/eua/internal/*', ...operatorGate);
