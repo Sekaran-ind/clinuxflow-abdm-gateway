@@ -10,8 +10,6 @@
 //     value ships in the frontend bundle) + a verified ClinuxFlow session JWT + per-account rate
 //     limits, with a tighter limit on every route that makes ABDM send an OTP.
 //   UHI network participants (UHI network-facing routes): the UHI message signature only.
-//   Citizens (cubo-diary, /citizen/*): no session. ABHA login with the person's own OTP, and
-//     anonymous UHI search; fixed request shapes and per-IP / per-target rate limits.
 //
 // Durable Objects are declared in wrangler.toml and exported below, per Workers' requirement
 // that DO classes be exported from the entrypoint module.
@@ -22,10 +20,8 @@ import { hprRoutes } from './routes/hpr.js';
 import { hfrRoutes } from './routes/hfr.js';
 import { abhaRoutes } from './routes/abha.js';
 import { uhiRoutes } from './routes/uhi.js';
-import { citizenRoutes } from './routes/citizen.js';
 import { serviceKeyAuth } from './lib/serviceAuth.js';
 import { requireClinuxSession } from './lib/userSession.js';
-import { recordAbdmTransactions } from './lib/transactionLog.js';
 import { OTP_SENDING_PATHS, rateLimit } from './lib/rateLimit.js';
 
 export { SessionTokenManager } from './durable-objects/SessionTokenManager.js';
@@ -45,8 +41,6 @@ const ALLOWED_ORIGINS = [
     // clinux-cubo (the provider workspace) in development. Its HPR/HFR/UHI journeys call this
     // Worker with the same session JWT and service key as clinux-frontend.
     'http://localhost:5174',
-    // cubo-diary (citizens) in development: ABHA sign-in and anonymous UHI search, /citizen/*.
-    'http://localhost:5175',
     // Capacitor's two platforms default to two DIFFERENT origins when no `server.androidScheme`
     // override is set in capacitor.config.json (confirmed against the actual config -- there is
     // none): iOS uses capacitor://localhost, Android uses https://localhost. Both are needed --
@@ -67,16 +61,13 @@ const userGate = [
     requireClinuxSession(),
     rateLimit({ bucket: 'abdm', limit: 120, windowSeconds: 60 }),
 ];
-// After the session gate, so every logged ABDM operation is attributed (src/lib/transactionLog.js).
-for (const prefix of ['/hpr/*', '/hfr/*', '/abha/*']) app.use(prefix, ...userGate, recordAbdmTransactions(prefix.slice(1, -2)));
+for (const prefix of ['/hpr/*', '/hfr/*', '/abha/*']) app.use(prefix, ...userGate);
 for (const path of OTP_SENDING_PATHS) app.use(path, rateLimit({ bucket: 'abdm-otp', limit: 10, windowSeconds: 600 }));
 
 app.route('/hpr', hprRoutes);
 app.route('/hfr', hfrRoutes);
 app.route('/abha', abhaRoutes);
 app.route('/uhi', uhiRoutes);
-// Citizens (cubo-diary): no ClinuxFlow session; see src/routes/citizen.js for what protects them.
-app.route('/citizen', citizenRoutes);
 
 app.notFound((c) => c.json({ success: false, error: 'Not found' }, 404));
 
