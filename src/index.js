@@ -2,6 +2,7 @@
 // that holds ABDM or UHI credentials or talks to NHA systems directly:
 //
 //   /hpr, /hfr, /abha   ABDM registries (HPR, HFR, ABHA). Outbound; driven by ClinuxFlow users.
+//   /api/v3/hip        ABDM HIE-CM callbacks to this gateway as a HIP (Scan & Share). Inbound.
 //   /uhi/hspa, /uhi/eua UHI network participation (provider and consumer roles), merged in from
 //                       the former clinux-uhi-gateway repo. See src/routes/uhi.js.
 //
@@ -23,6 +24,7 @@ import { hfrRoutes } from './routes/hfr.js';
 import { abhaRoutes } from './routes/abha.js';
 import { uhiRoutes } from './routes/uhi.js';
 import { citizenRoutes } from './routes/citizen.js';
+import { hipCallbackRoutes, scanShareRoutes } from './routes/scanShare.js';
 import { serviceKeyAuth } from './lib/serviceAuth.js';
 import { requireClinuxSession } from './lib/userSession.js';
 import { recordAbdmTransactions } from './lib/transactionLog.js';
@@ -73,10 +75,14 @@ for (const path of OTP_SENDING_PATHS) app.use(path, rateLimit({ bucket: 'abdm-ot
 
 app.route('/hpr', hprRoutes);
 app.route('/hfr', hfrRoutes);
+app.route('/abha/scan-share', scanShareRoutes);
 app.route('/abha', abhaRoutes);
 app.route('/uhi', uhiRoutes);
 // Citizens (cubo-diary): no ClinuxFlow session; see src/routes/citizen.js for what protects them.
 app.route('/citizen', citizenRoutes);
+// ABDM's HIE-CM calling this gateway as a HIP (Scan & Share). No ClinuxFlow session: ABDM's own
+// signed JWT is checked in src/routes/scanShare.js. The path is fixed by ABDM: {bridge url}/api/v3/hip/...
+app.route('/api/v3/hip', hipCallbackRoutes);
 
 app.notFound((c) => c.json({ success: false, error: 'Not found' }, 404));
 

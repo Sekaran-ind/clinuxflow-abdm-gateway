@@ -10,6 +10,9 @@
  *   hprHfrBaseUrl: string,
  *   abhaBaseUrl: string,
  *   xCmId: string,
+ *   phrBaseUrl: string,
+ *   hiecmBaseUrl: string,
+ *   facilityBridgeBaseUrl: string,
  *   clientId: string,
  *   clientSecret: string,
  * }}
@@ -34,6 +37,14 @@ export function getAbdmConfig(env) {
         // segment, so don't assume the two base URLs compose the same way when adding routes.
         abhaBaseUrl: env.ABDM_ABHA_BASE_URL || 'https://abhasbx.abdm.gov.in/abha/api/v3',
         xCmId: env.ABDM_X_CM_ID || 'sbx',
+        // The PHR web app a patient's phone opens: face-auth QR codes (ABHA V3 doc §6.2.2) and a
+        // facility's Scan & Share QR (Scan & Share doc §4.1) point here.
+        phrBaseUrl: env.ABDM_PHR_BASE_URL || 'https://phrsbx.abdm.gov.in',
+        // HIE-CM, for Scan & Share's on-share acknowledgement (/patient-share/v3/on-share) and
+        // ABDM's signing keys (/gateway/v3/certs).
+        hiecmBaseUrl: env.ABDM_HIECM_BASE_URL || 'https://dev.abdm.gov.in/api/hiecm',
+        // HFR's bridge service linkage (Scan & Share doc §3.2.5, option 2).
+        facilityBridgeBaseUrl: env.ABDM_FACILITY_BRIDGE_BASE_URL || 'https://facilitysbx.abdm.gov.in',
         clientId,
         clientSecret,
     };

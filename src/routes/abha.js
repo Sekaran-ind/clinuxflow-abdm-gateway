@@ -20,6 +20,7 @@ import { callAbdm, AbdmApiError } from '../lib/abdmClient.js';
 import { getAbdmConfig } from '../lib/config.js';
 import { fetchPublicKey, encryptOaepSha1 } from '../lib/encryption.js';
 import { getAccessToken, putTransactionState, recordOtpAttempt, clearTransactionState } from '../lib/sessionToken.js';
+import { fetchCard, fetchProfile } from '../lib/abhaSession.js';
 
 export const abhaRoutes = new Hono();
 
@@ -430,3 +431,165 @@ abhaRoutes.post('/profile/mobile/verify-otp', async (c) => {
     await clearTransactionState(c.env, txnId);
     return c.json({ success: true, txnId: result.txnId, authResult: result.authResult, accounts: result.accounts });
 });
+
+// =================================================================================================
+// ABDM M1 lanes beyond Aadhaar OTP (NHA ABHA V3 API doc v1, 31-07-2025)
+// =================================================================================================
+
+/** What every enrolment that creates an account answers with: { txnId, tokens, ABHAProfile }. */
+function enrolled(c, result) {
+    const { photo, ...profile } = result.ABHAProfile || {};
+    return c.json({
+        success: true,
+        txnId: result.txnId,
+        isNew: result.isNew,
+        abhaToken: result.tokens?.token,
+        abhaTokenExpiresIn: result.tokens?.expiresIn,
+        profile,
+    });
+}
+
+// ── Creation via Aadhaar face authentication (doc §6.2.2) ────────────────────────────────────
+// No fingerprint device needed: the patient's own phone does the face capture. ABDM issues a
+// txnId; the patient scans a QR of <phr>/face-auth?txnId=… with the ABHA app and completes the
+// capture there; the clinic polls capturePID until COMPLETE, then enrols with the Aadhaar number.
+
+// POST {} -> { txnId, qrUrl }
+abhaRoutes.post('/enrollment/face/init', async (c) => {
+    const config = getAbdmConfig(c.env);
+    const accessToken = await getAccessToken(c.env);
+    const result = await callAbdm({
+        url: `${config.abhaBaseUrl}/enrollment/enrol/auth/init`,
+        xCmId: config.xCmId,
+        accessToken,
+        body: { scope: ['abha-enrol', 'face-auth'] },
+    });
+    await putTransactionState(c.env, result.txnId, { flow: 'abha-face-enrollment', step: 'awaiting-capture' });
+    return c.json({ success: true, txnId: result.txnId, qrUrl: `${config.phrBaseUrl}/face-auth?txnId=${encodeURIComponent(result.txnId)}` });
+});
+
+// POST { txnId } -> { status: PENDING | VERIFIED | FAILED | COMPLETE, txnId }
+abhaRoutes.post('/enrollment/face/status', async (c) => {
+    const { txnId } = await c.req.json();
+    if (!txnId) return c.json({ success: false, error: 'txnId is required' }, 400);
+    const config = getAbdmConfig(c.env);
+    const accessToken = await getAccessToken(c.env);
+    const result = await callAbdm({
+        url: `${config.abhaBaseUrl}/enrollment/enrol/capturePID`,
+        xCmId: config.xCmId,
+        accessToken,
+        body: { scope: ['abha-enrol', 'face-verify'], txnId },
+    });
+    return c.json({ success: true, status: result.status, message: result.message, txnId: result.txnId || txnId });
+});
+
+// POST { txnId, aadhaar, mobile } -> same shape as /enrollment/verify-aadhaar-otp
+abhaRoutes.post('/enrollment/face/enrol', async (c) => {
+    const { txnId, aadhaar, mobile } = await c.req.json();
+    if (!txnId || !aadhaar || !mobile) return c.json({ success: false, error: 'txnId, aadhaar and mobile are required' }, 400);
+    const config = getAbdmConfig(c.env);
+    const accessToken = await getAccessToken(c.env);
+    const encryptedAadhaar = await encryptForAbha(config, aadhaar, accessToken);
+    const result = await callAbdm({
+        url: `${config.abhaBaseUrl}/enrollment/enrol/byAadhaar`,
+        xCmId: config.xCmId,
+        accessToken,
+        body: {
+            authData: { authMethods: ['face_auth'], face: { txnId, aadhaar: encryptedAadhaar, mobile } },
+            consent: { code: 'abha-enrollment', version: '1.4' },
+        },
+    });
+    await putTransactionState(c.env, result.txnId || txnId, { step: 'face-enrolled' });
+    return enrolled(c, result);
+});
+
+// ── Creation via driving licence (doc §4.0) ──────────────────────────────────────────────────
+// Mobile OTP (scope dl-flow), then the licence with both sides' photos, checked by ABDM against
+// the licence registry. Answers with an enrolment number, not an ABHA session.
+const DL_SCOPE = ['abha-enrol', 'mobile-verify', 'dl-flow'];
+const abdmTimeStamp = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+// POST { mobile } -> { txnId, message }
+abhaRoutes.post('/enrollment/dl/mobile-otp', async (c) => {
+    const { mobile } = await c.req.json();
+    if (!/^[6-9]\d{9}$/.test(String(mobile ?? ''))) return c.json({ success: false, error: 'A 10-digit mobile number is required' }, 400);
+    const result = await requestOtp(c, { path: '/enrollment/request/otp', scope: DL_SCOPE, loginHint: 'mobile', plaintextLoginId: mobile, otpSystem: 'abdm' });
+    await putTransactionState(c.env, result.txnId, { flow: 'abha-dl-enrollment', step: 'mobile-otp-sent' });
+    return c.json({ success: true, txnId: result.txnId, message: result.message });
+});
+
+// POST { txnId, otp } -> { txnId, authResult }
+abhaRoutes.post('/enrollment/dl/verify-mobile-otp', async (c) => {
+    const { txnId, otp } = await c.req.json();
+    if (!txnId || !otp) return c.json({ success: false, error: 'txnId and otp are required' }, 400);
+    const attempt = await recordOtpAttempt(c.env, txnId);
+    if (!attempt.allowed) return c.json({ success: false, error: 'Too many OTP attempts for this transaction' }, 429);
+    const result = await verifyOtp(c, { path: '/enrollment/auth/byAbdm', scope: DL_SCOPE, txnId, otp, extraOtpFields: { timeStamp: abdmTimeStamp() } });
+    await putTransactionState(c.env, txnId, { step: 'mobile-otp-verified' });
+    return c.json({ success: true, txnId: result.txnId || txnId, authResult: result.authResult, message: result.message });
+});
+
+// POST { txnId, documentId, firstName, middleName?, lastName?, dob (yyyy-mm-dd), gender,
+//        frontSidePhoto, backSidePhoto (base64 JPEG), address, state, district, pinCode }
+//   -> { enrolment: { enrolmentNumber, enrolmentState, abhaStatus, phrAddress, ... } }
+abhaRoutes.post('/enrollment/dl/document', async (c) => {
+    const b = await c.req.json();
+    const missing = ['txnId', 'documentId', 'firstName', 'dob', 'gender', 'frontSidePhoto', 'backSidePhoto', 'address', 'state', 'district', 'pinCode'].filter((k) => !b[k]);
+    if (missing.length) return c.json({ success: false, error: `Missing: ${missing.join(', ')}` }, 400);
+    const config = getAbdmConfig(c.env);
+    const accessToken = await getAccessToken(c.env);
+    const result = await callAbdm({
+        url: `${config.abhaBaseUrl}/enrollment/enrol/byDocument`,
+        xCmId: config.xCmId,
+        accessToken,
+        body: {
+            txnId: b.txnId, documentType: 'DRIVING_LICENCE', documentId: b.documentId,
+            firstName: b.firstName, middleName: b.middleName || '', lastName: b.lastName || '',
+            dob: b.dob, gender: b.gender, frontSidePhoto: b.frontSidePhoto, backSidePhoto: b.backSidePhoto,
+            address: b.address, state: b.state, district: b.district, pinCode: b.pinCode,
+            consent: { code: 'abha-enrollment', version: '1.4' },
+        },
+    });
+    await clearTransactionState(c.env, b.txnId);
+    return c.json({ success: true, enrolment: result.EnrolProfile || result.enrolProfile || result });
+});
+
+// ── Verification of an ABHA address by OTP (doc §14.1 / §12 step 2-3) ────────────────────────
+// The OTP goes to the mobile linked to that ABHA address; the answer is a PHR session, so the
+// profile and card are read with X-ABHA-Kind: phr.
+const ADDRESS_LOGIN = { scope: ['abha-address-login', 'mobile-verify'], loginHint: 'abha-address', otpSystem: 'abdm' };
+
+// POST { abhaAddress } -> { txnId, message }
+abhaRoutes.post('/login/address/request-otp', async (c) => {
+    const { abhaAddress } = await c.req.json();
+    const address = String(abhaAddress ?? '').trim().toLowerCase();
+    if (!/^[a-z0-9._]{3,}@(sbx|abdm)$/.test(address)) return c.json({ success: false, error: 'An ABHA address looks like name@sbx' }, 400);
+    const result = await requestOtp(c, { path: '/phr/web/login/abha/request/otp', ...ADDRESS_LOGIN, plaintextLoginId: address });
+    await putTransactionState(c.env, result.txnId, { flow: 'abha-address-login', step: 'otp-sent' });
+    return c.json({ success: true, txnId: result.txnId, message: result.message });
+});
+
+// POST { txnId, otp } -> { abhaToken, tokenKind: 'phr', account }
+abhaRoutes.post('/login/address/verify-otp', async (c) => {
+    const { txnId, otp } = await c.req.json();
+    if (!txnId || !otp) return c.json({ success: false, error: 'txnId and otp are required' }, 400);
+    const attempt = await recordOtpAttempt(c.env, txnId);
+    if (!attempt.allowed) return c.json({ success: false, error: 'Too many OTP attempts for this transaction' }, 429);
+    const result = await verifyOtp(c, { path: '/phr/web/login/abha/verify', scope: ADDRESS_LOGIN.scope, txnId, otp });
+    await clearTransactionState(c.env, txnId);
+    const token = result?.tokens?.token ?? result?.token;
+    if (!token) throw new HttpError(502, result?.message || 'ABDM did not return a session');
+    const { profilePhoto, ...account } = (result.users || result.accounts || [])[0] || {};
+    return c.json({ success: true, abhaToken: token, tokenKind: 'phr', account });
+});
+
+// ── With the patient's ABHA session: profile and ABHA card (doc §9, §11, §14.4) ───────────────
+// X-ABHA-Token plus X-ABHA-Kind (abha | phr, default abha). The card is ABDM's own (PNG or PDF).
+const sessionOf = (c) => ({ token: requireAbhaToken(c), kind: c.req.header('X-ABHA-Kind') === 'phr' ? 'phr' : 'abha' });
+
+abhaRoutes.get('/session/profile', async (c) => {
+    const { photo, ...profile } = await fetchProfile(c.env, sessionOf(c));
+    return c.json({ success: true, profile: { ...profile, ...(c.req.query('photo') === '1' && photo ? { photo } : {}) } });
+});
+
+abhaRoutes.get('/session/card', async (c) => c.json({ success: true, ...(await fetchCard(c.env, sessionOf(c))) }));
