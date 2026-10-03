@@ -5,6 +5,7 @@ import { constants, generateKeyPairSync, privateDecrypt } from 'node:crypto';
 import { Hono } from 'hono';
 import { abhaRoutes } from './abha.js';
 import { hprRoutes, hprMatch, normaliseHprIdNumber } from './hpr.js';
+import { hfrRoutes } from './hfr.js';
 import { attestHpr, readAttestation } from '../lib/hprAttestation.js';
 
 const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -150,5 +151,42 @@ describe('ABHA address verification by OTP, and the ABHA card', () => {
         expect(calls[0].headers['X-token']).toBe('Bearer phr-tok');
         expect(out).toEqual({ success: true, contentType: 'image/png', data: Buffer.from([137, 80, 78, 71]).toString('base64') });
         expect((await abhaRoutes.request('/session/card', {}, env)).status).toBe(400);
+    });
+});
+
+describe('HFR facility from the registry (for updates)', () => {
+    // Shapes as HFR answered for IN3310002300 (2026-10-03).
+    const SEARCH = { facilityId: 'IN3310002300', facilityName: 'tsekaran1949s Clinic', facilityStatus: 'Submitted', ownershipCode: 'P', systemOfMedicineCode: 'M', facilityTypeCode: 'CL', facilityType: 'Clinic/ Dispensary', stateLGDCode: '33', districtLGDCode: '591', subDistrictLGDCode: '6620', address: 'Thillai Nagar,Tiruchirappalli', pincode: '620017', latitude: '10.823899', longitude: '78.685388' };
+    const LISTED = { facilities: [
+        { id: 'IN3310002298', name: 'tsekaran1949s Clinic', contactNumber: 9000000001, address: { addressLine1: 'Other', addressLine2: 'X' } },
+        { id: 'IN3310002300', name: 'tsekaran1949s Clinic', contactNumber: 9345121505, latitude: '10.823899', langitude: '78.685388', address: { addressLine1: 'Thillai Nagar', addressLine2: 'Tiruchirappalli', city: null, district: '591', state: '33', pincode: '620017' } },
+    ] };
+    const CONTACT = { facility: { facilityId: 'IN3310002300', contactName: 'Prabu  Segaran', contactMobile: '******1905', contactEmail: 'tse*********@malar.com', hprid: '71-0285-6047-2578' } };
+
+    it('combines HFR’s search, listing and contact answers', async () => {
+        const calls = stub((url, body) => {
+            if (url.endsWith('/FacilityManagement/v1.5/facility/search')) return Response.json({ facilities: [SEARCH] });
+            if (url.endsWith('/v1.0/facility/search-facilities')) return Response.json(LISTED);
+            return Response.json(CONTACT);
+        });
+        const res = await asUser(hfrRoutes).request('/facility/in3310002300/registry', {}, env);
+        const { facility } = await res.json();
+        expect(facility).toEqual({
+            facilityId: 'IN3310002300', facilityName: 'tsekaran1949s Clinic', status: 'Submitted', ownershipCode: 'P', systemsOfMedicine: ['M'], facilityTypeCode: 'CL', facilityType: 'Clinic/ Dispensary',
+            stateLGDCode: '33', districtLGDCode: '591', subDistrictLGDCode: '6620', addressLine1: 'Thillai Nagar', addressLine2: 'Tiruchirappalli', pincode: '620017',
+            latitude: '10.823899', longitude: '78.685388', contactNumber: '9345121505', contactName: 'Prabu  Segaran', contactMobileMasked: '******1905', contactEmailMasked: 'tse*********@malar.com', managerHprIdNumber: '71-0285-6047-2578',
+        });
+        const listing = calls.find((x) => x.url.endsWith('/search-facilities')).body;
+        expect(listing.facility).toEqual({ facilityName: 'tsekaran1949s Clinic', state: '33', district: '591' });
+        expect(listing.requestId).toMatch(/^[0-9a-f-]{36}$/);
+    });
+
+    it('still answers from the search alone when the other two fail, and 404s an unknown id', async () => {
+        stub((url) => (url.endsWith('/FacilityManagement/v1.5/facility/search') ? Response.json({ facilities: [SEARCH] }) : Response.json({ message: 'x' }, { status: 400 })));
+        const { facility } = await (await asUser(hfrRoutes).request('/facility/IN3310002300/registry', {}, env)).json();
+        expect(facility).toMatchObject({ addressLine1: 'Thillai Nagar,Tiruchirappalli', contactNumber: '', pincode: '620017' });
+        stub(() => Response.json({ facilities: [] }));
+        expect((await asUser(hfrRoutes).request('/facility/IN3310002301/registry', {}, env)).status).toBe(404);
+        expect((await asUser(hfrRoutes).request('/facility/nope/registry', {}, env)).status).toBe(400);
     });
 });

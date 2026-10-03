@@ -23,7 +23,15 @@ import { attestHpr } from '../lib/hprAttestation.js';
 
 export const hprRoutes = new Hono();
 
+class HttpError extends Error {
+    constructor(status, message) {
+        super(message);
+        this.status = status;
+    }
+}
+
 hprRoutes.onError((err, c) => {
+    if (err instanceof HttpError) return c.json({ success: false, error: err.message }, err.status);
     if (err instanceof AbdmApiError) {
         // REQUEST-ID is what NHA's sandbox support asks for when reporting a failing call.
         console.error(`[hpr] ABDM error ${err.status} REQUEST-ID=${err.requestId}:`, JSON.stringify(err.body));
@@ -569,35 +577,33 @@ hprRoutes.post('/professional/documents', async (c) => {
     return c.json({ success: true, ...result });
 });
 
-// --- Upload a professional document ---------------------------------------------------------------
-// Real, confirmed-missing route — a prior session's own comment here claimed "no separate
-// document-upload API is shown" in the doc; re-reading the real spec PDF directly (explicit user
-// instruction) confirms this was wrong: the Upload Documents API is real spec section 10/11
-// (POST .../uploads/upload-document), and document_id correlates one uploaded file to a specific
-// qualification/registration entry (registrationAcademic.registrationData[].document_id) or the
-// top-level profilePhoto — practitionerDocs.js's own DOC_TYPES (profilePhoto/degreeCertificate/
-// registrationCertificate/proofOfWorkCertificate/proofOfNameChangeRegCertificate/
-// proofOfNameChangeQualCertificate) are this same real 6-type list, not invented. Body: { hprToken,
-// hprId, documentType, documentBase64, documentId? } — thin passthrough, same discipline as
-// /professional/update.
+// --- Upload a professional document (HPR-080) ---------------------------------------------------
+// For documents not ready at registration: fetch-documents-list gives each pending document's id,
+// then upload-document takes { hpr_token, document: [{ document_id, document_type, fileType,
+// data }] } (shape from the sandbox OpenAPI's UploadDocument schema). The old passthrough of
+// { hprToken, documentType, documentBase64 } was not a shape ABDM accepts.
+// Body here: { hprToken, documents: [{ documentId, documentType, fileType, data (base64) }] }.
 hprRoutes.post('/professional/documents/upload', async (c) => {
-    const body = await c.req.json();
-    if (!body.hprToken) return c.json({ success: false, error: 'hprToken is required' }, 400);
-    if (!body.documentType || !body.documentBase64) return c.json({ success: false, error: 'documentType and documentBase64 are required' }, 400);
+    const { hprToken, documents } = await c.req.json();
+    if (!hprToken) return c.json({ success: false, error: 'hprToken is required' }, 400);
+    if (!Array.isArray(documents) || !documents.length || documents.some((d) => !d?.documentId || !d.documentType || !d.data)) {
+        return c.json({ success: false, error: 'documents: [{ documentId, documentType, fileType, data }] is required' }, 400);
+    }
 
     const config = getAbdmConfig(c.env);
     const accessToken = await getAccessToken(c.env);
 
     const result = await callAbdm({
-        // hprHfrBaseUrl already carries the /v4/int prefix (see lib/config.js) — every other
-        // route in this file appends only the path after that, same here.
         url: `${config.hprHfrBaseUrl}/apis/v1/uploads/upload-document`,
         xCmId: config.xCmId,
         accessToken,
-        body,
+        body: {
+            hpr_token: hprToken,
+            document: documents.map((d) => ({ document_id: Number(d.documentId), document_type: d.documentType, fileType: d.fileType || 'application/pdf', data: d.data })),
+        },
     });
 
-    return c.json({ success: true, ...result });
+    return c.json({ success: true, ...(Array.isArray(result) ? { results: result } : result) });
 });
 
 // --- Email verification (generate / regenerate / verify) -----------------------------------------
@@ -720,6 +726,60 @@ hprRoutes.get('/master/districts/:stateId', async (c) => {
     });
     return c.json({ success: true, data });
 });
+
+// --- Masters for the professional profile (Master_API_HPR.pdf §4-16; paths as the sandbox's own
+// OpenAPI spec /v4/int/v3/api-docs/HPR lists them, e.g. "universites" sic). One cached helper;
+// path ids are digits only, so a cache key can't be steered into another master's.
+async function hprMaster(c, key, path, { method = 'GET', body } = {}) {
+    const config = getAbdmConfig(c.env);
+    const data = await getCachedMasterData(c.env.MASTER_DATA_CACHE, `hpr:${key}`, async () => {
+        const accessToken = await getAccessToken(c.env);
+        return callAbdm({ url: `${config.hprHfrBaseUrl}${path}`, method, body, xCmId: config.xCmId, accessToken });
+    });
+    return c.json({ success: true, data });
+}
+const digits = (c, name) => {
+    const v = c.req.param(name);
+    if (!/^\d{1,10}$/.test(v)) throw new HttpError(400, `${name} must be a number`);
+    return v;
+};
+
+hprRoutes.get('/master/languages', (c) => hprMaster(c, 'languages', '/apis/v1/masters/languages'));
+hprRoutes.get('/master/countries', (c) => hprMaster(c, 'countries', '/apis/v1/masters/countries'));
+hprRoutes.get('/master/sub-districts/:districtId', (c) => hprMaster(c, `sub-districts:${digits(c, 'districtId')}`, `/apis/v1/masters/sub-districts/${digits(c, 'districtId')}`));
+hprRoutes.get('/master/nurse-councils', (c) => hprMaster(c, 'nurse-councils', '/apis/v1/masters/nurse-councils'));
+hprRoutes.get('/master/affiliated-boards/:stateId', (c) => hprMaster(c, `affiliated-boards:${digits(c, 'stateId')}`, `/apis/v1/masters/affiliated-board/states/${digits(c, 'stateId')}`));
+// Colleges in a state (filter by systemOfMedicineId on the client: the documented
+// /colleges/{stateId}/{systemId} answers HIS-500 in the sandbox, checked live 2026-10-03).
+hprRoutes.get('/master/colleges/:stateId', (c) => hprMaster(c, `colleges:${digits(c, 'stateId')}`, `/apis/v1/masters/colleges/${digits(c, 'stateId')}`));
+// Universities a college is affiliated to.
+hprRoutes.get('/master/universities/:collegeId', (c) => hprMaster(c, `universities:${digits(c, 'collegeId')}`, `/apis/v1/masters/universites/${digits(c, 'collegeId')}`));
+// Courses (degrees) for a profession and system of medicine: POST with filters (doc §7). Live
+// 2026-10-03: qualificationCount "2" lists the additional (postgraduate) courses, anything else the
+// basic ones (only MBBS for Modern Medicine); a body with neither filter answers HIS-500.
+hprRoutes.get('/master/courses', (c) => {
+    const hprType = c.req.query('hprType') || '';
+    const systemOfMedicine = c.req.query('systemOfMedicine') || '';
+    const level = c.req.query('level') === 'additional' ? 'additional' : 'basic';
+    if (!/^(doctor|nurse|pharmacist)?$/.test(hprType)) throw new HttpError(400, 'hprType is doctor, nurse or pharmacist');
+    if (systemOfMedicine.length > 80) throw new HttpError(400, 'systemOfMedicine is too long');
+    const body = { ...(hprType ? { hprType } : {}), ...(systemOfMedicine ? { systemOfMedicine } : {}), ...(level === 'additional' ? { qualificationCount: '2' } : {}) };
+    return hprMaster(c, `courses:${hprType}:${systemOfMedicine.toLowerCase()}:${level}`, '/apis/v1/masters/courses', { method: 'POST', body });
+});
+// Ministries, for government work (doc §16). Live 2026-10-03: with the gateway's token ABDM
+// answers HIS-1119 "Please enter the valid token", so this is called with the professional's own
+// HPR token (X-HPR-Token) as the bearer, like the account routes below. Not cached per person:
+// the list is the same for everyone, so a success is cached for all.
+hprRoutes.get('/master/ministries', async (c) => {
+    const hprToken = c.req.header('X-HPR-Token');
+    if (!hprToken) throw new HttpError(400, 'X-HPR-Token header is required (the professional’s HPR session)');
+    const config = getAbdmConfig(c.env);
+    const data = await getCachedMasterData(c.env.MASTER_DATA_CACHE, 'hpr:ministries', () =>
+        callAbdm({ url: `${config.hprHfrBaseUrl}/apis/v1/master/getAllMinistry`, method: 'GET', xCmId: config.xCmId, accessToken: hprToken, maxAttempts: 1 }));
+    return c.json({ success: true, data });
+});
+// Public-sector undertakings (HFR's getPsuDetailsByMinistry; works with the gateway token).
+hprRoutes.get('/master/psus', (c) => hprMaster(c, 'psus', '/getPsuDetailsByMinistry'));
 
 // --- Change/Forgot Password, Forgot HPR ID, Id Card, Account Profile, Logout -------------------
 // The 4 real gaps found by reading "HPID/2. Change password.pdf", "HPID/3. Forgot hprid.pdf",
