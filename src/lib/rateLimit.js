@@ -64,6 +64,8 @@ export const OTP_SENDING_PATHS = [
     '/abha/enrollment/email-verification-link',
     '/abha/login/request-otp',
     '/abha/profile/mobile/request-otp',
+    '/abha/enrollment/dl/mobile-otp',
+    '/abha/login/address/request-otp',
     '/hpr/registration/aadhaar-otp',
     '/hpr/registration/mobile-otp',
     '/hpr/professional/email/generate-otp',
