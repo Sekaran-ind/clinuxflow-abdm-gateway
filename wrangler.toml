@@ -29,7 +29,6 @@ ABDM_ABHA_BASE_URL = "https://abhasbx.abdm.gov.in/abha/api/v3"
 ABDM_X_CM_ID = "sbx"
 ABDM_PHR_BASE_URL = "https://phrsbx.abdm.gov.in"
 ABDM_HIECM_BASE_URL = "https://dev.abdm.gov.in/api/hiecm"
-ABDM_FACILITY_BRIDGE_BASE_URL = "https://facilitysbx.abdm.gov.in"
 
 # UHI (see src/uhi/config.js for every variable). "local" makes the EUA role call this Worker's
 # own HSPA and trust its own keys, for development; "sandbox" goes through the NHA UHI gateway

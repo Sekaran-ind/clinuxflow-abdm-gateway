@@ -12,7 +12,6 @@
  *   xCmId: string,
  *   phrBaseUrl: string,
  *   hiecmBaseUrl: string,
- *   facilityBridgeBaseUrl: string,
  *   clientId: string,
  *   clientSecret: string,
  * }}
@@ -43,8 +42,6 @@ export function getAbdmConfig(env) {
         // HIE-CM, for Scan & Share's on-share acknowledgement (/patient-share/v3/on-share) and
         // ABDM's signing keys (/gateway/v3/certs).
         hiecmBaseUrl: env.ABDM_HIECM_BASE_URL || 'https://dev.abdm.gov.in/api/hiecm',
-        // HFR's bridge service linkage (Scan & Share doc §3.2.5, option 2).
-        facilityBridgeBaseUrl: env.ABDM_FACILITY_BRIDGE_BASE_URL || 'https://facilitysbx.abdm.gov.in',
         clientId,
         clientSecret,
     };

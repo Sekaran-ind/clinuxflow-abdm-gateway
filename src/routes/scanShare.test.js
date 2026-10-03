@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { generateKeyPairSync, createSign } from 'node:crypto';
-import { hipCallbackRoutes, scanShareRoutes, recordShare, shareDate, shareQrUrl, validHipName } from './scanShare.js';
+import { hipCallbackRoutes, linkFailure, scanShareRoutes, recordShare, shareDate, shareQrUrl, validHipName } from './scanShare.js';
 import { resetJwksCache, verifyAbdmJwt } from '../lib/abdmJwt.js';
 import { d1 } from '../testing/d1Sqlite.js';
 import { Hono } from 'hono';
@@ -32,7 +32,7 @@ beforeEach(() => {
     vi.stubGlobal('fetch', vi.fn(async (url, init = {}) => {
         if (String(url).endsWith('/gateway/v3/certs')) return init.headers?.['X-CM-ID'] ? Response.json({ keys: [jwk] }) : new Response('{}', { status: 401 });
         if (String(url).endsWith('/patient-share/v3/on-share')) { onShares.push(JSON.parse(init.body)); return new Response(null, { status: 202 }); }
-        if (String(url).includes('MutipleHRPAddUpdateServices')) return Response.json({ message: 'ok' });
+        if (String(url) === 'https://apihspsbx.abdm.gov.in/v4/int/v1/bridges/MutipleHRPAddUpdateServices') return Response.json([{ servicesLinked: { id: 'SBX_1', types: ['HIP'], active: true } }]);
         throw new Error(`unexpected fetch ${url}`);
     }));
 });
@@ -134,6 +134,24 @@ describe('Scan & Share queue (staff)', () => {
         db.raw.exec(`UPDATE scan_share_requests SET created_at = datetime('now', '-2 days')`);
         await req(asClinic('clinic-1'), '/queue');
         expect(db.raw.prepare('SELECT profile_json FROM scan_share_requests').get().profile_json).toBeNull();
+    });
+});
+
+describe('HFR bridge link answers', () => {
+    it('treats an error in a 200 answer as a failure, except "already associated" with our bridge', () => {
+        expect(linkFailure([{ servicesLinked: { id: 'SBX_1' } }], 'SBX_1')).toBeNull();
+        expect(linkFailure([{ error: { code: '2500', message: 'Bridge Id SBX_1  is already associated with service id:IN1' } }], 'SBX_1')).toBeNull();
+        expect(linkFailure([{ error: { code: '2500', message: 'Bridge Id OTHER is already associated with service id:IN1' } }], 'SBX_1')).toMatch(/OTHER/);
+        expect(linkFailure([{ error: { code: '1400', message: 'Invalid facility' } }], 'SBX_1')).toBe('Invalid facility');
+    });
+
+    it('refuses to register the facility when HFR refuses the link', async () => {
+        fetch.mockImplementation(async (url) => (String(url).includes('MutipleHRP') ? Response.json([{ error: { code: '1400', message: 'Invalid facility' } }]) : Response.json({})));
+        const app = new Hono().use('*', async (c, next) => { c.set('user', { clinicId: 'clinic-1', accountId: 'a' }); await next(); }).route('/', scanShareRoutes);
+        const res = await app.request('/facilities', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ facilityId: 'IN3310002300', facilityName: 'X', hipName: 'X Clinic', linkWithAbdm: true }) }, env);
+        expect(res.status).toBe(502);
+        expect((await res.json()).error).toBe('Invalid facility');
+        expect(db.raw.prepare('SELECT COUNT(*) AS n FROM hip_facilities').get().n).toBe(0);
     });
 });
 
