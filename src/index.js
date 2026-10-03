@@ -2,7 +2,13 @@
 // that holds ABDM or UHI credentials or talks to NHA systems directly:
 //
 //   /hpr, /hfr, /abha   ABDM registries (HPR, HFR, ABHA). Outbound; driven by ClinuxFlow users.
-//   /api/v3/hip        ABDM HIE-CM callbacks to this gateway as a HIP (Scan & Share). Inbound.
+//   /api/v3/…, /v3/…   ABDM HIE-CM callbacks to this gateway: as a HIP (Scan & Share, Running
+//                       Token, Scan & Pay, M2 linking and data flow) and as a HIU (M3 consent and
+//                       data flow). Inbound; each checked against HIE-CM's signature.
+//   /hiu/data-push/:id  HIPs pushing encrypted records for an M3 data request (Fidelius-encrypted
+//                       for that request; the id is single-use and unguessable).
+//   /pay/:token         the Scan & Pay page a patient's ABHA app opens.
+//   /hie/*              staff: care contexts, consents, records, Scan & Pay orders.
 //   /uhi/hspa, /uhi/eua UHI network participation (provider and consumer roles), merged in from
 //                       the former clinux-uhi-gateway repo. See src/routes/uhi.js.
 //
@@ -25,6 +31,9 @@ import { abhaRoutes } from './routes/abha.js';
 import { uhiRoutes } from './routes/uhi.js';
 import { citizenRoutes } from './routes/citizen.js';
 import { hipCallbackRoutes, scanShareRoutes } from './routes/scanShare.js';
+import { hipCallbacks, hipStaffRoutes } from './routes/hip.js';
+import { dataPushRoutes, hiuCallbacks, hiuStaffRoutes } from './routes/hiu.js';
+import { payRoutes, scanPayCallbacks, scanPayStaffRoutes } from './routes/scanPay.js';
 import { serviceKeyAuth } from './lib/serviceAuth.js';
 import { requireClinuxSession } from './lib/userSession.js';
 import { recordAbdmTransactions } from './lib/transactionLog.js';
@@ -70,7 +79,7 @@ const userGate = [
     rateLimit({ bucket: 'abdm', limit: 120, windowSeconds: 60 }),
 ];
 // After the session gate, so every logged ABDM operation is attributed (src/lib/transactionLog.js).
-for (const prefix of ['/hpr/*', '/hfr/*', '/abha/*']) app.use(prefix, ...userGate, recordAbdmTransactions(prefix.slice(1, -2)));
+for (const prefix of ['/hpr/*', '/hfr/*', '/abha/*', '/hie/*']) app.use(prefix, ...userGate, recordAbdmTransactions(prefix.slice(1, -2)));
 for (const path of OTP_SENDING_PATHS) app.use(path, rateLimit({ bucket: 'abdm-otp', limit: 10, windowSeconds: 600 }));
 
 app.route('/hpr', hprRoutes);
@@ -83,6 +92,14 @@ app.route('/citizen', citizenRoutes);
 // ABDM's HIE-CM calling this gateway as a HIP (Scan & Share). No ClinuxFlow session: ABDM's own
 // signed JWT is checked in src/routes/scanShare.js. The path is fixed by ABDM: {bridge url}/api/v3/hip/...
 app.route('/api/v3/hip', hipCallbackRoutes);
+app.route('/', hipCallbacks);
+app.route('/', hiuCallbacks);
+app.route('/', scanPayCallbacks);
+app.route('/hiu/data-push', dataPushRoutes);
+app.route('/pay', payRoutes);
+app.route('/hie/hip', hipStaffRoutes);
+app.route('/hie/hiu', hiuStaffRoutes);
+app.route('/hie/scan-pay', scanPayStaffRoutes);
 
 app.notFound((c) => c.json({ success: false, error: 'Not found' }, 404));
 

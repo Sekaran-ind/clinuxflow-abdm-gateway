@@ -16,3 +16,7 @@ UHI_HSPA_PRIVATE_KEY_DER=
 UHI_EUA_PRIVATE_KEY_DER=
 # Local dev: which ClinuxFlow clinic ids may use the HSPA operator routes (comma-separated).
 UHI_HSPA_OPERATOR_CLINIC_IDS=
+
+# Optional: M2 linking OTPs go here as { to, message } (src/lib/linkOtp.js). Unset in the sandbox, staff see the OTP instead.
+# SMS_WEBHOOK_URL=
+# SMS_WEBHOOK_TOKEN=
