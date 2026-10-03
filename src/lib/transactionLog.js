@@ -15,6 +15,7 @@
 import { matchedRoutes } from 'hono/route';
 
 const MAX_ERROR = 200;
+let missingTableWarned = false;
 
 /** The handler's own route pattern ("POST /hpr/registration/aadhaar-link"), not a middleware's "/hpr/*". */
 export function operationOf(c) {
@@ -59,7 +60,16 @@ export function recordAbdmTransactions(service) {
                     )
                     .run();
             } catch (err) {
-                console.error('[transactionLog] could not record', service, err.message);
+                // The usual local cause: the gateway running on its own local database, which has no
+                // clinuxflow-api migrations. Say so once, plainly, instead of one line per call.
+                if (/no such table/i.test(err.message)) {
+                    if (!missingTableWarned) {
+                        missingTableWarned = true;
+                        console.error('[transactionLog] abdm_transactions does not exist in this database, so Operations → ABDM transactions stays empty. Locally, run the gateway with `npm run dev` (it shares clinuxflow-api\'s local D1) and apply clinuxflow-api\'s migrations.');
+                    }
+                } else {
+                    console.error('[transactionLog] could not record', service, err.message);
+                }
             }
         })();
         try {

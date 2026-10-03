@@ -29,7 +29,6 @@ ABDM_ABHA_BASE_URL = "https://abhasbx.abdm.gov.in/abha/api/v3"
 ABDM_X_CM_ID = "sbx"
 ABDM_PHR_BASE_URL = "https://phrsbx.abdm.gov.in"
 ABDM_HIECM_BASE_URL = "https://dev.abdm.gov.in/api/hiecm"
-ABDM_FACILITY_BRIDGE_BASE_URL = "https://facilitysbx.abdm.gov.in"
 # This Worker's public origin (= the bridge URL set with scripts/set-bridge-url.js). The Scan & Pay
 # page and the M3 data push URL are built on it; unset, the origin a request came in on is used.
 # ABDM_PUBLIC_BASE_URL = "https://clinuxflow-abdm-gateway.<account>.workers.dev"
@@ -118,7 +117,7 @@ new_sqlite_classes = ["UhiRecordStore", "RateLimiter"]
 # The shared `clinuxflow` D1 database (owned by clinuxflow-api, which holds its migrations), bound
 # here only to WRITE abdm_transactions rows (src/lib/transactionLog.js) — same database id as
 # clinuxflow-api's and clinuxflow-fhir-api's DB binding.
-# Local dev: run `wrangler dev --persist-to ../clinuxflow-api/.wrangler/state` so the gateway
+# Local dev: `npm run dev` runs `wrangler dev --persist-to ../clinuxflow-api/.wrangler/state`, so the gateway
 # writes into the same local database clinuxflow-api reads (local D1 files are keyed by this id).
 [[d1_databases]]
 binding = "DB"

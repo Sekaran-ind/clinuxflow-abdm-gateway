@@ -156,6 +156,64 @@ hfrRoutes.post('/facility/submit', async (c) => {
     return c.json({ success: result.status !== 'Not Created', ...result });
 });
 
+// --- A submitted facility as HFR has it (for updates) -----------------------------------------
+// Updates start from the registry, not from what this device remembers. No single HFR API returns
+// a facility, so three are combined (all checked live on IN3310002300, 2026-10-03):
+//   v1.5 facility/search {facilityId}     ownership, system of medicine, type code, state/district/
+//                                         sub-district LGD codes, address, PIN, coordinates, status
+//   v1.0 facility/search-facilities       address line 2 (city) and the full contact number; needs
+//                                         { requestId, timestamp, facility: { facilityName, state,
+//                                         district } } and returns every same-named facility there
+//   v1.5 fetchFacilityContactDetails      contact name and the manager's HPR number (mobile and
+//                                         email come back masked)
+// Not available from HFR at all: the photos, opening hours, email (unmasked), ownership sub-types,
+// facility sub-type, speciality type, type of service, and the additional/detailed sections.
+// GET /hfr/facility/:facilityId/registry -> { facility: { ...normalised } }
+export function registryFacility(search = {}, listing = {}, contact = {}) {
+    const coords = (v) => (v === undefined || v === null || v === '' ? '' : String(v).trim());
+    return {
+        facilityId: search.facilityId,
+        facilityName: search.facilityName,
+        status: search.facilityStatus || listing.facilityProfileStatus || '',
+        ownershipCode: search.ownershipCode || '',
+        systemsOfMedicine: String(search.systemOfMedicineCode || '').split(',').map((x) => x.trim()).filter(Boolean),
+        facilityTypeCode: search.facilityTypeCode || '',
+        facilityType: search.facilityType || listing.facilityType || '',
+        stateLGDCode: String(search.stateLGDCode ?? listing.address?.state ?? ''),
+        districtLGDCode: String(search.districtLGDCode ?? listing.address?.district ?? ''),
+        subDistrictLGDCode: String(search.subDistrictLGDCode ?? ''),
+        addressLine1: listing.address?.addressLine1 || search.address || '',
+        addressLine2: listing.address?.addressLine2 || listing.address?.city || '',
+        pincode: String(search.pincode || listing.address?.pincode || ''),
+        latitude: coords(search.latitude ?? listing.latitude),
+        longitude: coords(search.longitude ?? listing.langitude ?? listing.longitude),
+        contactNumber: listing.contactNumber ? String(listing.contactNumber) : '',
+        contactName: contact.contactName || '',
+        contactMobileMasked: contact.contactMobile || '',
+        contactEmailMasked: contact.contactEmail || '',
+        managerHprIdNumber: contact.hprid || '',
+    };
+}
+
+hfrRoutes.get('/facility/:facilityId/registry', async (c) => {
+    const facilityId = c.req.param('facilityId').toUpperCase();
+    if (!/^IN[A-Z0-9]{10}$/.test(facilityId)) throw new HttpError(400, 'An HFR facility id starts with IN and has 12 characters.');
+    const config = getAbdmConfig(c.env);
+    const accessToken = await getAccessToken(c.env);
+    const call = (path, body) => callAbdm({ url: `${config.hprHfrBaseUrl}${path}`, xCmId: config.xCmId, accessToken, body, maxAttempts: 2 });
+
+    const found = await call('/FacilityManagement/v1.5/facility/search', { facilityId, ownershipCode: '', stateLGDCode: '', facilityName: '', page: 1, resultsPerPage: 10 });
+    const search = (found?.facilities || []).find((f) => f.facilityId === facilityId);
+    if (!search) throw new HttpError(404, 'HFR has no facility with that id.');
+    const requestId = crypto.randomUUID();
+    const [listed, contact] = await Promise.all([
+        call('/v1.0/facility/search-facilities', { requestId, timestamp: new Date().toISOString(), facility: { facilityName: search.facilityName, state: String(search.stateLGDCode), district: String(search.districtLGDCode) } }).catch(() => null),
+        call('/v1.5/facility/fetchFacilityContactDetails', { facilityId }).catch(() => null),
+    ]);
+    const listing = (listed?.facilities || []).find((f) => f.id === facilityId) || {};
+    return c.json({ success: true, facility: registryFacility(search, listing, contact?.facility || {}) });
+});
+
 // --- Master data (cached) ------------------------------------------------------------------------
 async function cachedGet(c, cacheKey, path) {
     const config = getAbdmConfig(c.env);

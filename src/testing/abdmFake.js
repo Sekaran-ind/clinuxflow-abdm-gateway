@@ -39,7 +39,7 @@ export function fakeAbdm({ respond, external } = {}) {
     vi.stubGlobal('fetch', vi.fn(async (url, init = {}) => {
         const u = String(url);
         if (u.endsWith('/gateway/v3/certs')) return Response.json({ keys: [jwk] });
-        const hiecm = u.match(/^https:\/\/dev\.abdm\.gov\.in\/api\/hiecm(\/.*)$/) || u.match(/^https:\/\/facilitysbx\.abdm\.gov\.in(\/.*)$/);
+        const hiecm = u.match(/^https:\/\/dev\.abdm\.gov\.in\/api\/hiecm(\/.*)$/) || u.match(/^https:\/\/apihspsbx\.abdm\.gov\.in\/v4\/int(\/v1\/bridges\/.*)$/);
         if (hiecm) {
             const body = init.body ? JSON.parse(init.body) : null;
             calls.push({ path: hiecm[1], method: init.method, headers: init.headers, body });

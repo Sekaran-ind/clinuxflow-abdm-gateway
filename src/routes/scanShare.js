@@ -43,6 +43,21 @@ export const shareQrUrl = (phrBaseUrl, facilityId, counterId) =>
 /** HFR's rule for a HIP name (doc §3.2.5): at most 15 characters, no special characters. */
 export const validHipName = (s) => /^[A-Za-z0-9 ]{1,15}$/.test(String(s ?? '').trim());
 
+/**
+ * Why HFR's bridge-link answer is a failure, or null. "Already associated" with this facility is
+ * success for us: the link we wanted is there.
+ */
+export function linkFailure(result, bridgeId) {
+    const entries = Array.isArray(result) ? result : [result];
+    for (const e of entries) {
+        if (!e?.error) continue;
+        const message = String(e.error.message || e.error.code || 'HFR refused the link');
+        if (/already associated/i.test(message) && message.includes(bridgeId)) continue;
+        return message;
+    }
+    return null;
+}
+
 const masked = (v) => (v ? `••••••${String(v).slice(-4)}` : '');
 
 async function forgetOldProfiles(db) {
@@ -206,14 +221,18 @@ scanShareRoutes.post('/facilities', async (c) => {
     if (linkWithAbdm) {
         const config = getAbdmConfig(c.env);
         const accessToken = await getAccessToken(c.env);
-        // HFR's Multiple HRP API (doc §3.2.5 option 2): this gateway's client id is the bridge.
-        await callAbdm({
-            url: `${config.facilityBridgeBaseUrl}/v1/bridges/MutipleHRPAddUpdateServices`,
+        // HFR's Multiple HRP API (New_HFR_APIs_Documentation_SBX §4): this gateway's client id is
+        // the bridge. It lives on the HPR/HFR host (the Scan & Share doc's facilitysbx URL is out of
+        // date), and answers 200 with [{ servicesLinked }] or [{ error: { code, message } }].
+        const result = await callAbdm({
+            url: `${config.hprHfrBaseUrl}/v1/bridges/MutipleHRPAddUpdateServices`,
             xCmId: config.xCmId,
             accessToken,
             maxAttempts: 1,
             body: { facilityId: id, facilityName: String(facilityName || '').trim(), HRP: [{ bridgeId: config.clientId, hipName: String(hipName).trim(), type: 'HIP', active: true }] },
         });
+        const failure = linkFailure(result, config.clientId);
+        if (failure) return c.json({ success: false, error: failure }, 502);
         linked = true;
     }
 
@@ -302,10 +321,13 @@ scanShareRoutes.patch('/facilities/:facilityId', async (c) => {
     const config = getAbdmConfig(c.env);
     if (linkWithAbdm && hiuEnabled && !row.hiu_enabled) {
         if (!validHipName(row.hip_name || '')) return c.json({ success: false, error: 'Give the facility a name for ABHA apps first (at most 15 letters, digits or spaces).' }, 400);
-        await callAbdm({
-            url: `${config.facilityBridgeBaseUrl}/v1/bridges/MutipleHRPAddUpdateServices`, xCmId: config.xCmId, accessToken: await getAccessToken(c.env), maxAttempts: 1,
+        // Same HFR API and host as the HIP link above; refusals come back in a 200.
+        const linked = await callAbdm({
+            url: `${config.hprHfrBaseUrl}/v1/bridges/MutipleHRPAddUpdateServices`, xCmId: config.xCmId, accessToken: await getAccessToken(c.env), maxAttempts: 1,
             body: { facilityId: row.facility_id, facilityName: row.facility_name, HRP: [{ bridgeId: config.clientId, hipName: row.hip_name, type: 'HIU', active: true }] },
         });
+        const failure = linkFailure(linked, config.clientId);
+        if (failure) return c.json({ success: false, error: failure }, 502);
     }
     if (linkWithAbdm && scanPayEnabled !== !!row.scan_pay_enabled) {
         await callAbdm({
