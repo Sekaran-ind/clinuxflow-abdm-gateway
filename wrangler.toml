@@ -30,6 +30,9 @@ ABDM_X_CM_ID = "sbx"
 ABDM_PHR_BASE_URL = "https://phrsbx.abdm.gov.in"
 ABDM_HIECM_BASE_URL = "https://dev.abdm.gov.in/api/hiecm"
 ABDM_FACILITY_BRIDGE_BASE_URL = "https://facilitysbx.abdm.gov.in"
+# This Worker's public origin (= the bridge URL set with scripts/set-bridge-url.js). The Scan & Pay
+# page and the M3 data push URL are built on it; unset, the origin a request came in on is used.
+# ABDM_PUBLIC_BASE_URL = "https://clinuxflow-abdm-gateway.<account>.workers.dev"
 
 # UHI (see src/uhi/config.js for every variable). "local" makes the EUA role call this Worker's
 # own HSPA and trust its own keys, for development; "sandbox" goes through the NHA UHI gateway
@@ -60,6 +63,10 @@ UHI_GATEWAY_BASE_URL = "https://uhigatewaysandbox.abdm.gov.in"
 #   JWT_SECRET        - the SAME value clinuxflow-api signs session tokens with. Every
 #                       user-driven route verifies the caller's ClinuxFlow session with it
 #                       (src/lib/userSession.js); without it those routes answer 503.
+#   SMS_WEBHOOK_URL, SMS_WEBHOOK_TOKEN (optional)
+#                     - where the M2 user-initiated-linking OTP is POSTed as { to, message }
+#                       (src/lib/linkOtp.js). Without it the sandbox shows the OTP to staff and
+#                       production refuses to start linking.
 #   UHI_HSPA_PRIVATE_KEY_DER, UHI_EUA_PRIVATE_KEY_DER
 #                     - base64 PKCS8 Ed25519 private keys for the two UHI roles (generate with
 #                       `npm run uhi:generate-keys`). A role without a key is disabled.

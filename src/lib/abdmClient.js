@@ -45,6 +45,8 @@ function buildAbdmHeaders({ requestId, xCmId, extra }) {
  * @param {string} [params.accessToken] - ABDM gateway session token (Authorization: Bearer ...).
  * @param {object} [params.extraHeaders] - e.g. { 'x-hprid-auth': token } for HFR facility writes.
  * @param {number} [params.maxAttempts=3]
+ * @param {string} [params.requestId] - REQUEST-ID to send; defaults to a fresh one. HIE-CM calls
+ *   that ABDM answers by callback need it chosen up front, to match the callback's response.requestId.
  * @returns {Promise<any>} parsed JSON response body.
  */
 export async function callAbdm({
@@ -55,10 +57,10 @@ export async function callAbdm({
     accessToken,
     extraHeaders = {},
     maxAttempts = 3,
+    requestId = crypto.randomUUID(),
 }) {
     // Same REQUEST-ID reused across retries of one logical call — if ABDM treats REQUEST-ID as
     // an idempotency key on their side, retried attempts won't be double-processed.
-    const requestId = crypto.randomUUID();
     const headers = buildAbdmHeaders({
         requestId,
         xCmId,

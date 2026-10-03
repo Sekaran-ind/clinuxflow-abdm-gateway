@@ -5,7 +5,7 @@ import { resetJwksCache, verifyAbdmJwt } from '../lib/abdmJwt.js';
 import { d1 } from '../testing/d1Sqlite.js';
 import { Hono } from 'hono';
 
-const MIGRATIONS = ['0018_add_doctor_roster_and_scan_share.sql'];
+const MIGRATIONS = ['0018_add_doctor_roster_and_scan_share.sql', '0019_add_abdm_m2_m3_scan_pay_running_token.sql'];
 const namespace = (handler) => ({ idFromName: (n) => n, get: () => ({ fetch: handler }) });
 
 // ABDM's signing key, as HIE-CM publishes it.

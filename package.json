@@ -13,6 +13,7 @@
     "uhi:generate-keys": "node scripts/generate-uhi-keys.js"
   },
   "dependencies": {
+    "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
     "hono": "^4.6.0",
     "zod": "^3.25.76"

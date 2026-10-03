@@ -12,6 +12,13 @@
 //   GET  /abha/scan-share/queue              today's shares (?facilityId=&context=)
 //   POST /abha/scan-share/queue/:id/claim    -> the shared profile, once; then it is cleared
 //   POST /abha/scan-share/queue/:id/dismiss
+//   PATCH /abha/scan-share/facilities/:id    { hiuEnabled, scanPayEnabled, upiVpa, payeeName } (M2/M3, Scan & Pay)
+//
+// Running Token Status (NHA "Running Token Status" doc): staff call the next token at a counter;
+// ABDM asks on a patient's behalf which token is being served there.
+//   POST /abha/scan-share/counters/call-next  { facilityId, context } -> the token now being served
+//   GET  /abha/scan-share/counters            today's counters (?facilityId=)
+//   POST /api/v3/hip/patient/running-token/status  ABDM -> gateway -> running-token/on-status
 //
 // For ABDM to reach the callback, the gateway's public URL must be set as this client's bridge
 // URL (scripts/set-bridge-url.js) and the facility linked to the bridge as a HIP service — through
@@ -24,6 +31,7 @@ import { callAbdm, AbdmApiError } from '../lib/abdmClient.js';
 import { getAbdmConfig } from '../lib/config.js';
 import { getAccessToken } from '../lib/sessionToken.js';
 import { verifyAbdmJwt } from '../lib/abdmJwt.js';
+import { abdmCallbackAuth, answerLater, hiecm, requestIdOf } from '../lib/abdmCallback.js';
 
 /** Today in India (token numbers restart each day per counter). */
 export const shareDate = (now = Date.now()) => new Date(now + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
@@ -135,6 +143,29 @@ hipCallbackRoutes.post('/patient/share', async (c) => {
     return c.json({}, 202);
 });
 
+/** The token being served at a counter today, and the average minutes per token once two have been called. */
+export async function runningToken(db, hipId, context, now = Date.now()) {
+    const row = await db.prepare('SELECT * FROM counter_tokens WHERE hip_id = ? AND context = ? AND token_date = ?').bind(hipId, context, shareDate(now)).first();
+    if (!row || !row.running_token) return null;
+    const minutes = row.calls > 1 ? (Date.parse(row.last_called_at) - Date.parse(row.first_called_at)) / 60000 / (row.calls - 1) : null;
+    return { runningToken: row.running_token, averageMinutes: minutes === null ? null : Math.max(1, Math.round(minutes)) };
+}
+
+hipCallbackRoutes.post('/patient/running-token/status', abdmCallbackAuth(), async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const requestId = requestIdOf(c);
+    return answerLater(c, 'running-token', async () => {
+        const hipId = String(body.hipId || c.req.header('X-HIP-ID') || '').trim();
+        const context = String(body.context ?? '').trim();
+        const reply = (payload) => hiecm(c.env, '/patient-share/v3/running-token/on-status', { ...payload, response: { requestId } }, { hipId: hipId || undefined });
+        const facility = await c.env.DB.prepare('SELECT 1 FROM hip_facilities WHERE facility_id = ? AND active = 1').bind(hipId).first();
+        if (!facility) return reply({ error: { code: 'ABDM-9999', message: 'This facility does not issue tokens through ClinuxFlow' } });
+        const now = await runningToken(c.env.DB, hipId, context);
+        if (!now) return reply({ error: { code: 'ABDM-1031', message: 'No token has been called at this counter yet today' } });
+        await reply({ token: { hipId, context, runningTokenNumber: String(now.runningToken), ...(now.averageMinutes ? { averageTokenServiceTimeInMinutes: now.averageMinutes } : {}) } });
+    });
+});
+
 // ── Staff (behind the session gate of /abha/*) ───────────────────────────────────────────────
 export const scanShareRoutes = new Hono();
 
@@ -149,6 +180,7 @@ scanShareRoutes.onError((err, c) => {
 
 const facilityRow = (r, phrBaseUrl) => ({
     facilityId: r.facility_id, facilityName: r.facility_name, hipName: r.hip_name, linkedWithAbdm: !!r.linked_with_abdm, active: !!r.active,
+    hiuEnabled: !!r.hiu_enabled, scanPayEnabled: !!r.scan_pay_enabled, upiVpa: r.upi_vpa || '', payeeName: r.payee_name || '',
     qrUrl: shareQrUrl(phrBaseUrl, r.facility_id, '{counter}'),
 });
 
@@ -220,10 +252,12 @@ scanShareRoutes.get('/queue', async (c) => {
             id: r.id, facilityId: r.hip_id, context: r.context, tokenNumber: r.token_number, status: r.status,
             name: r.display_name, gender: r.gender, yearOfBirth: r.year_of_birth, abhaAddress: r.abha_address,
             abhaNumber: r.abha_number ? masked(r.abha_number) : '', phone: masked(p.phoneNumber),
-            acknowledged: !!r.acknowledged, ackError: r.ack_error, at: r.created_at, claimedAt: r.claimed_at,
+            acknowledged: !!r.acknowledged, ackError: r.ack_error, at: r.created_at, claimedAt: r.claimed_at, calledAt: r.called_at,
         };
     });
-    return c.json({ success: true, date: shareDate(), shares });
+    const counters = {};
+    for (const s of shares) if (!(s.context in counters)) counters[s.context] = await runningToken(db, s.facilityId, s.context);
+    return c.json({ success: true, date: shareDate(), shares, counters });
 });
 
 scanShareRoutes.post('/queue/:id/claim', async (c) => {
@@ -245,4 +279,81 @@ scanShareRoutes.post('/queue/:id/dismiss', async (c) => {
     const { clinicId } = c.get('user');
     await c.env.DB.prepare(`UPDATE scan_share_requests SET status = 'dismissed', profile_json = NULL WHERE id = ? AND clinic_id = ?`).bind(c.req.param('id'), clinicId).run();
     return c.json({ success: true });
+});
+
+/** A UPI id: handle@bank. */
+export const validVpa = (v) => /^[A-Za-z0-9._-]{2,256}@[A-Za-z][A-Za-z0-9.]{1,63}$/.test(String(v || '').trim());
+
+// What else the facility does on ABDM: receive records (HIU, M3) and Scan & Pay. Turning either on
+// links it on ABDM's side too (HFR's bridge API for the HIU role; scanPay/updateVersion for Pay),
+// unless `linkWithAbdm` is false because it was done on the HFR portal.
+scanShareRoutes.patch('/facilities/:facilityId', async (c) => {
+    const { clinicId } = c.get('user');
+    const db = c.env.DB;
+    const row = await db.prepare('SELECT * FROM hip_facilities WHERE facility_id = ? AND clinic_id = ? AND active = 1').bind(c.req.param('facilityId'), clinicId).first();
+    if (!row) return c.json({ success: false, error: 'Register this facility for Scan & Share first.' }, 404);
+    const body = await c.req.json().catch(() => ({}));
+    const hiuEnabled = body.hiuEnabled === undefined ? !!row.hiu_enabled : !!body.hiuEnabled;
+    const scanPayEnabled = body.scanPayEnabled === undefined ? !!row.scan_pay_enabled : !!body.scanPayEnabled;
+    const upiVpa = body.upiVpa === undefined ? row.upi_vpa : String(body.upiVpa || '').trim() || null;
+    if (upiVpa && !validVpa(upiVpa)) return c.json({ success: false, error: 'That is not a UPI id (like clinic@okbank).' }, 400);
+    const payeeName = body.payeeName === undefined ? row.payee_name : String(body.payeeName || '').trim().slice(0, 60) || null;
+    const linkWithAbdm = body.linkWithAbdm !== false;
+    const config = getAbdmConfig(c.env);
+    if (linkWithAbdm && hiuEnabled && !row.hiu_enabled) {
+        if (!validHipName(row.hip_name || '')) return c.json({ success: false, error: 'Give the facility a name for ABHA apps first (at most 15 letters, digits or spaces).' }, 400);
+        await callAbdm({
+            url: `${config.facilityBridgeBaseUrl}/v1/bridges/MutipleHRPAddUpdateServices`, xCmId: config.xCmId, accessToken: await getAccessToken(c.env), maxAttempts: 1,
+            body: { facilityId: row.facility_id, facilityName: row.facility_name, HRP: [{ bridgeId: config.clientId, hipName: row.hip_name, type: 'HIU', active: true }] },
+        });
+    }
+    if (linkWithAbdm && scanPayEnabled !== !!row.scan_pay_enabled) {
+        await callAbdm({
+            url: `${config.gatewayBaseUrl}/scanPay/updateVersion`, method: 'PATCH', xCmId: config.xCmId, accessToken: await getAccessToken(c.env), maxAttempts: 1,
+            body: { recordShareEnabled: true, scanPayEnabled, scanPayVersion: 'V3', serviceId: [row.facility_id] },
+        });
+    }
+    await db
+        .prepare(`UPDATE hip_facilities SET hiu_enabled = ?, scan_pay_enabled = ?, upi_vpa = ?, payee_name = ?, updated_at = datetime('now') WHERE facility_id = ?`)
+        .bind(hiuEnabled ? 1 : 0, scanPayEnabled ? 1 : 0, upiVpa, payeeName, row.facility_id)
+        .run();
+    return c.json({ success: true, facility: facilityRow(await db.prepare('SELECT * FROM hip_facilities WHERE facility_id = ?').bind(row.facility_id).first(), config.phrBaseUrl) });
+});
+
+scanShareRoutes.get('/counters', async (c) => {
+    const { clinicId } = c.get('user');
+    const { facilityId } = c.req.query();
+    const args = [clinicId, shareDate()];
+    const { results } = await c.env.DB.prepare(`SELECT * FROM counter_tokens WHERE clinic_id = ? AND token_date = ?${facilityId ? ' AND hip_id = ?' : ''}`).bind(...args, ...(facilityId ? [facilityId] : [])).all();
+    const counters = [];
+    for (const r of results) counters.push({ facilityId: r.hip_id, context: r.context, ...(await runningToken(c.env.DB, r.hip_id, r.context)) });
+    return c.json({ success: true, counters });
+});
+
+// "Call next": the lowest token at this counter above the one being served that is still in the queue.
+scanShareRoutes.post('/counters/call-next', async (c) => {
+    const { clinicId } = c.get('user');
+    const { facilityId, context } = await c.req.json().catch(() => ({}));
+    const hipId = String(facilityId || '').trim();
+    const ctx = String(context ?? '').trim();
+    const db = c.env.DB;
+    const owner = await db.prepare('SELECT clinic_id FROM hip_facilities WHERE facility_id = ? AND active = 1').bind(hipId).first();
+    if (!owner || owner.clinic_id !== clinicId) return c.json({ success: false, error: 'Unknown facility.' }, 404);
+    const date = shareDate();
+    const current = await db.prepare('SELECT running_token FROM counter_tokens WHERE hip_id = ? AND context = ? AND token_date = ?').bind(hipId, ctx, date).first();
+    const next = await db
+        .prepare(`SELECT id, token_number FROM scan_share_requests WHERE hip_id = ? AND context = ? AND share_date = ? AND status != 'dismissed' AND token_number > ? ORDER BY token_number LIMIT 1`)
+        .bind(hipId, ctx, date, current?.running_token || 0)
+        .first();
+    if (!next) return c.json({ success: false, error: 'Nobody else is waiting at this counter.' }, 409);
+    const at = new Date().toISOString();
+    await db
+        .prepare(
+            `INSERT INTO counter_tokens (hip_id, context, token_date, clinic_id, running_token, calls, first_called_at, last_called_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+             ON CONFLICT (hip_id, context, token_date) DO UPDATE SET running_token = excluded.running_token, calls = counter_tokens.calls + 1, last_called_at = excluded.last_called_at, updated_at = datetime('now')`,
+        )
+        .bind(hipId, ctx, date, clinicId, next.token_number, at, at)
+        .run();
+    await db.prepare('UPDATE scan_share_requests SET called_at = ? WHERE id = ?').bind(at, next.id).run();
+    return c.json({ success: true, facilityId: hipId, context: ctx, ...(await runningToken(db, hipId, ctx)) });
 });
