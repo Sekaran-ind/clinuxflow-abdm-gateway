@@ -19,6 +19,7 @@ import { getAbdmConfig } from '../lib/config.js';
 import { fetchPublicKey, encryptPkcs1 } from '../lib/encryption.js';
 import { getAccessToken, getTransactionState, putTransactionState, recordOtpAttempt, clearTransactionState } from '../lib/sessionToken.js';
 import { getCachedMasterData } from '../lib/masterData.js';
+import { attestHpr } from '../lib/hprAttestation.js';
 
 export const hprRoutes = new Hono();
 
@@ -410,6 +411,81 @@ hprRoutes.post('/professional/fetch', async (c) => {
     });
 
     return c.json({ success: true, ...result });
+});
+
+// --- Search HPR (NHA "Search HPRID Document API", HPID/4. Search hprid.pdf) -------------------
+// For the doctor roster: find a practitioner by HPR ID (address or 14-digit number) or by mobile.
+// Every match comes with a signed attestation (src/lib/hprAttestation.js) the roster stores.
+//   searchByHprId/{hprId}       -> { hprIdNumber, name, hprId, categoryId, subCategoryId, authMethods }
+//   searchByMobile/{mobile}     -> [ same ]
+// A 14-digit HPR number tries searchByHprId, then fetch-professional-info ("2. Fetch Professional
+// Details API.pdf", which takes the number as practitioner.id but only finds public profiles).
+const HPR_CATEGORY_ID = { doctor: '1', nurse: '2', pharmacist: '6' };
+
+export function normaliseHprIdNumber(input) {
+    const d = String(input ?? '').replace(/\D/g, '');
+    return d.length === 14 ? `${d.slice(0, 2)}-${d.slice(2, 6)}-${d.slice(6, 10)}-${d.slice(10)}` : null;
+}
+
+/** One search hit, whichever API it came from. */
+export function hprMatch(raw = {}) {
+    return {
+        hprIdNumber: raw.hprIdNumber || raw.hpr_id || '',
+        hprId: raw.hprId || '',
+        name: raw.name || '',
+        categoryId: raw.categoryId ? String(raw.categoryId) : HPR_CATEGORY_ID[String(raw.hpr_category || '').toLowerCase()] || '',
+        subCategoryId: raw.subCategoryId ? String(raw.subCategoryId) : '',
+        ...(raw.application_status ? { applicationStatus: raw.application_status } : {}),
+        ...(raw.active !== undefined ? { active: String(raw.active) === 'true' } : {}),
+    };
+}
+
+// POST { hprId } | { mobile } -> { matches: [{ hprIdNumber, hprId, name, categoryId, attestation }] }
+hprRoutes.post('/search', async (c) => {
+    const { hprId, mobile } = await c.req.json().catch(() => ({}));
+    const config = getAbdmConfig(c.env);
+    const accessToken = await getAccessToken(c.env);
+    let found = [];
+    try {
+        if (mobile) {
+            if (!/^[6-9]\d{9}$/.test(String(mobile))) return c.json({ success: false, error: 'A 10-digit mobile number is required' }, 400);
+            const result = await callAbdm({ url: `${config.hprHfrBaseUrl}/v1/search/searchByMobile/${mobile}`, method: 'GET', xCmId: config.xCmId, accessToken, maxAttempts: 1 });
+            found = (Array.isArray(result) ? result : [result]).filter(Boolean).map(hprMatch);
+        } else if (normaliseHprIdNumber(hprId)) {
+            // searchByHprId first (it takes the number as well as the address); fetch-professional-
+            // info only answers for professionals who made their profile public (live 2026-10-02:
+            // empty for an approved HPR ID whose profile isn't published).
+            const number = normaliseHprIdNumber(hprId);
+            try {
+                const result = await callAbdm({ url: `${config.hprHfrBaseUrl}/v1/search/searchByHprId/${number}`, method: 'GET', xCmId: config.xCmId, accessToken, maxAttempts: 1 });
+                found = result?.hprIdNumber ? [hprMatch(result)] : [];
+            } catch (err) {
+                if (!(err instanceof AbdmApiError && err.status >= 400 && err.status < 500)) throw err;
+            }
+            if (!found.length) {
+                const result = await callAbdm({
+                    url: `${config.hprHfrBaseUrl}/apis/v1/doctors/fetch-professional-info`, xCmId: config.xCmId, accessToken, maxAttempts: 1,
+                    body: { practitioner: { id: number, name: '', contactNumber: '', state: '', registrationNumber: '' } },
+                });
+                found = (result?.practitioners || []).flat().filter(Boolean).map(hprMatch);
+            }
+        } else if (/^[A-Za-z0-9._-]{3,}(@hpr\.abdm)?$/.test(String(hprId ?? '').trim())) {
+            const id = String(hprId).trim().toLowerCase();
+            const result = await callAbdm({ url: `${config.hprHfrBaseUrl}/v1/search/searchByHprId/${encodeURIComponent(id)}`, method: 'GET', xCmId: config.xCmId, accessToken, maxAttempts: 1 });
+            found = result ? [hprMatch(result)] : [];
+        } else {
+            return c.json({ success: false, error: 'Give an HPR ID (14 digits, or name@hpr.abdm) or a mobile number' }, 400);
+        }
+    } catch (err) {
+        // HPR answers "not found" with a 4xx; that is an empty search, not a failure.
+        if (err instanceof AbdmApiError && err.status >= 400 && err.status < 500) found = [];
+        else throw err;
+    }
+    found = found.filter((m) => m.hprIdNumber || m.hprId);
+    const user = c.get('user');
+    const secret = c.env.JWT_SECRET;
+    const matches = await Promise.all(found.map(async (m) => ({ ...m, ...(secret && user?.clinicId ? { attestation: await attestHpr(secret, user.clinicId, m) } : {}) })));
+    return c.json({ success: true, matches });
 });
 
 // --- Update professional / documents / email verification --------------------------------------

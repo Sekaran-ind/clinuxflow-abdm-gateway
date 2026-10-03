@@ -28,6 +28,7 @@ import { getAbdmConfig } from '../lib/config.js';
 import { getAccessToken, putTransactionState, recordOtpAttempt, clearTransactionState } from '../lib/sessionToken.js';
 import { rateLimit } from '../lib/rateLimit.js';
 import { requestOtp, verifyOtp } from './abha.js';
+import { fetchCard, fetchProfile } from '../lib/abhaSession.js';
 import { buildEuaCitizenRoutes } from '../uhi/eua/routes.js';
 import { euaDeps } from './uhi.js';
 
@@ -148,79 +149,17 @@ function session(c) {
     return { token, kind: c.req.header('X-ABHA-Kind') === 'phr' ? 'phr' : 'abha' };
 }
 
-// Raw GET against ABHA with the user's token, for endpoints that return JSON or a file.
-async function abhaGet(c, paths, { token }) {
-    const config = getAbdmConfig(c.env);
-    const accessToken = await getAccessToken(c.env);
-    let last;
-    // The sandbox PHR paths are given without hyphens in NHA's PDF (a text-extraction artefact:
-    // production uses phr-card / abha-profile); the first that isn't 404 wins.
-    for (const path of paths) {
-        const res = await fetch(`${config.abhaBaseUrl}${path}`, {
-            headers: { 'REQUEST-ID': crypto.randomUUID(), TIMESTAMP: new Date().toISOString(), 'X-CM-ID': config.xCmId, Authorization: `Bearer ${accessToken}`, 'X-token': `Bearer ${token}` },
-        });
-        if (res.status === 404 && path !== paths.at(-1)) {
-            last = res;
-            continue;
-        }
-        if (!res.ok) {
-            const text = await res.text().catch(() => '');
-            let body;
-            try {
-                body = JSON.parse(text);
-            } catch {
-                body = text.slice(0, 300);
-            }
-            throw new AbdmApiError(res.status, body);
-        }
-        return res;
-    }
-    throw new AbdmApiError(last?.status ?? 404, 'not found');
-}
-
-const PROFILE_PATHS = { abha: ['/profile/account'], phr: ['/phr/web/login/profile/abha-profile', '/phr/web/login/profile/abhaprofile'] };
-const CARD_PATHS = { abha: ['/profile/account/abha-card'], phr: ['/phr/web/login/profile/abha/phr-card', '/phr/web/login/profile/abha/phrcard'] };
-
-/** The ABHA profile, normalised across the two token kinds. */
-async function fetchProfile(c, s) {
-    const p = await (await abhaGet(c, PROFILE_PATHS[s.kind], s)).json();
-    return {
-        abhaNumber: p.ABHANumber ?? p.abhaNumber ?? p.healthIdNumber,
-        abhaAddress: p.preferredAbhaAddress ?? p.abhaAddress ?? p.healthId,
-        name: p.name ?? p.fullName ?? [p.firstName, p.middleName, p.lastName].filter(Boolean).join(' '),
-        firstName: p.firstName,
-        middleName: p.middleName,
-        lastName: p.lastName,
-        gender: p.gender,
-        dayOfBirth: p.dayOfBirth,
-        monthOfBirth: p.monthOfBirth,
-        yearOfBirth: p.yearOfBirth,
-        districtName: p.districtName,
-        stateName: p.stateName,
-        kycVerified: p.kycVerified ?? (p.kycStatus ? p.kycStatus === 'VERIFIED' : undefined),
-        photo: p.profilePhoto ?? null,
-    };
-}
-
 citizenRoutes.get('/abha/profile', async (c) => {
-    const { photo, ...profile } = await fetchProfile(c, session(c));
+    const { photo, mobile, ...profile } = await fetchProfile(c.env, session(c));
     // Only what the diary shows or uses: the photo only when asked for, no mobile, no raw KYC.
     return c.json({ success: true, profile: { ...profile, ...(c.req.query('photo') === '1' && photo ? { photo } : {}) } });
 });
 
-citizenRoutes.get('/abha/card', async (c) => {
-    const res = await abhaGet(c, CARD_PATHS[session(c).kind], session(c));
-    const contentType = (res.headers.get('content-type') || 'application/octet-stream').split(';')[0].trim();
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    if (!bytes.length) throw new HttpError(502, 'ABDM returned an empty ABHA card');
-    let bin = '';
-    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-    return c.json({ success: true, contentType, data: btoa(bin) });
-});
+citizenRoutes.get('/abha/card', async (c) => c.json({ success: true, ...(await fetchCard(c.env, session(c))) }));
 
 /** Who is booking: confirmed with ABDM from the caller's ABHA session, never from the request. */
 async function verifyCustomer(c) {
-    const p = await fetchProfile(c, session(c));
+    const p = await fetchProfile(c.env, session(c));
     if (!p.abhaNumber && !p.abhaAddress) throw new HttpError(401, 'The ABHA session could not be confirmed. Sign in with ABHA again.');
     return { abhaNumber: p.abhaNumber, abhaAddress: p.abhaAddress, name: p.name };
 }
