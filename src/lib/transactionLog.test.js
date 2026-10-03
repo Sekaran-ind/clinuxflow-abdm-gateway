@@ -31,7 +31,9 @@ describe('ABDM transaction log', () => {
         expect(res.status).toBe(200);
         const row = columns(DB.rows[0]);
         expect(row).toMatchObject({ clinicId: 'clinic-1', accountId: 'acc-1', service: 'hpr', operation: 'GET /hpr/master/districts/:stateId', httpStatus: 200, ok: 1, abdmStatus: null, error: null });
-        expect(JSON.stringify(DB.rows)).not.toContain('27');
+        // The row's own random id and duration can contain "27" by chance (that made this flaky).
+        const { id, duration, ...logged } = row;
+        expect(JSON.stringify(logged)).not.toContain('27');
         expect(JSON.stringify(DB.rows)).not.toContain('secret');
     });
 

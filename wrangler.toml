@@ -117,7 +117,7 @@ new_sqlite_classes = ["UhiRecordStore", "RateLimiter"]
 # The shared `clinuxflow` D1 database (owned by clinuxflow-api, which holds its migrations), bound
 # here only to WRITE abdm_transactions rows (src/lib/transactionLog.js) — same database id as
 # clinuxflow-api's and clinuxflow-fhir-api's DB binding.
-# Local dev: run `wrangler dev --persist-to ../clinuxflow-api/.wrangler/state` so the gateway
+# Local dev: `npm run dev` runs `wrangler dev --persist-to ../clinuxflow-api/.wrangler/state`, so the gateway
 # writes into the same local database clinuxflow-api reads (local D1 files are keyed by this id).
 [[d1_databases]]
 binding = "DB"
